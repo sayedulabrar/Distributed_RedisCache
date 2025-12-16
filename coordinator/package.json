@@ -1,0 +1,13 @@
+{
+  "name": "coordinator-service",
+  "version": "1.0.0",
+  "description": "Coordinator service for distributed Redis cache",
+  "main": "coordinator.js",
+  "scripts": {
+    "start": "node coordinator.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "redis": "^4.6.0"
+  }
+}
