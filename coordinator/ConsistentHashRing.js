@@ -124,8 +124,6 @@ class ConsistentHashRing {
 
   /**
    * Find the Redis node responsible for a key using binary search
-   * 
-   * This is the magic of consistent hashing!
    */
   getNodeForKey(key) {
     if (this.sortedKeys.length === 0) {
