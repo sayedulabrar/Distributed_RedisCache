@@ -1,7 +1,7 @@
 {
   "name": "api-server",
-  "version": "1.0.0",
-  "description": "API Server for distributed Redis cache",
+  "version": "2.0.0",
+  "description": "API Server for consistent hashing Redis cache",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

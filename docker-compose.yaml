@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # Redis Cache Nodes
   redis-node-0:
@@ -45,7 +47,7 @@ services:
   #   networks:
   #     - cache-network
 
-  # Coordinator Service
+  # Coordinator Service with Consistent Hashing
   coordinator:
     build: ./coordinator
     container_name: coordinator_service

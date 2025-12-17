@@ -1,5 +1,5 @@
 const express = require('express');
-const ModuloHashRing = require('./ModuloHashRing');
+const ConsistentHashRing = require('./ConsistentHashRing');
 
 const app = express();
 app.use(express.json());
@@ -14,13 +14,13 @@ const parseRedisNodes = () => {
 };
 
 const redisNodes = parseRedisNodes();
-const cacheRing = new ModuloHashRing(redisNodes);
+const cacheRing = new ConsistentHashRing(redisNodes);
 
 // Initialize Redis connections
 (async () => {
   try {
     await cacheRing.connect();
-    console.log('[Coordinator] All Redis connections established');
+    console.log('[Coordinator] All Redis connections established using consistent hashing');
   } catch (error) {
     console.error('[Coordinator] Failed to connect to Redis:', error);
     process.exit(1);
@@ -156,27 +156,21 @@ app.get('/mappings', async (req, res) => {
   }
 });
 
-// POST /hash
-app.post('/hash', (req, res) => {
-  const { key } = req.body;
-
-  if (!key) {
-    return res.status(400).json({
+// GET /ring (New! Visualize the hash ring)
+app.get('/ring', (req, res) => {
+  try {
+    const visualization = cacheRing.visualizeRing();
+    res.json({
+      hashSpace: cacheRing.hashSpace,
+      nodeCount: cacheRing.nodeCount,
+      ring: visualization
+    });
+  } catch (error) {
+    res.status(500).json({
       success: false,
-      error: 'Key is required'
+      error: error.message
     });
   }
-
-  const hash = cacheRing.hashFunction(key);
-  const nodeIndex = cacheRing.getNodeIndex(key);
-
-  res.json({
-    key: key,
-    hash: hash,
-    nodeIndex: nodeIndex,
-    nodeName: `cache_node_${nodeIndex}`,
-    calculation: `${hash} % ${cacheRing.nodeCount} = ${nodeIndex}`
-  });
 });
 
 // DELETE /cache
@@ -200,16 +194,20 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'coordinator',
-    nodes: cacheRing.nodeCount
+    algorithm: 'consistent-hashing',
+    nodes: cacheRing.nodeCount,
+    hashSpace: cacheRing.hashSpace
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
-    name: 'Cache Coordinator Service',
-    description: 'Modulo hashing coordinator for distributed Redis cache',
-    version: '1.0.0',
+    name: 'Consistent Hashing Cache Coordinator',
+    description: 'Lab 2: Solving the scale-up problem with consistent hashing',
+    version: '2.0.0',
+    algorithm: 'consistent-hashing',
     nodes: cacheRing.nodeCount,
+    hashSpace: cacheRing.hashSpace,
     endpoints: {
       'POST /cache': 'Set a value (body: { key, value, ttl? })',
       'GET /cache/:key': 'Get a value',
@@ -218,7 +216,7 @@ app.get('/', (req, res) => {
       'GET /stats': 'Get cache statistics',
       'GET /distribution': 'See key distribution',
       'GET /mappings': 'Get all key-to-node mappings',
-      'POST /hash': 'Get hash for a key (body: { key })',
+      'GET /ring': 'Visualize the hash ring',
       'GET /health': 'Health check'
     }
   });
@@ -229,10 +227,12 @@ const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(60));
-  console.log('COORDINATOR SERVICE STARTED');
+  console.log('CONSISTENT HASHING COORDINATOR STARTED');
   console.log('='.repeat(60));
   console.log(`Server: http://localhost:${PORT}`);
+  console.log(`Algorithm: Consistent Hashing`);
   console.log(`Redis Nodes: ${cacheRing.nodeCount}`);
+  console.log(`Hash Space: 0 to ${cacheRing.hashSpace - 1}`);
   console.log('='.repeat(60) + '\n');
 });
 

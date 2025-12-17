@@ -1,7 +1,7 @@
 {
-  "name": "coordinator-service",
-  "version": "1.0.0",
-  "description": "Coordinator service for distributed Redis cache",
+  "name": "consistent-coordinator-service",
+  "version": "2.0.0",
+  "description": "Consistent hashing coordinator for distributed Redis cache",
   "main": "coordinator.js",
   "scripts": {
     "start": "node coordinator.js"
