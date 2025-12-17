@@ -105,9 +105,9 @@ app.get('/mappings', async (req, res) => {
   }
 });
 
-// POST /hash
-app.post('/hash', async (req, res) => {
-  const result = await forwardToCoordinator('POST', '/hash', req.body);
+// GET /ring (New endpoint for Lab 2)
+app.get('/ring', async (req, res) => {
+  const result = await forwardToCoordinator('GET', '/ring');
   
   if (result.success) {
     res.json(result.data);
@@ -142,9 +142,9 @@ app.get('/', async (req, res) => {
   const coordInfo = await forwardToCoordinator('GET', '/');
   
   res.json({
-    name: 'Simple Modulo Cache API',
-    description: 'Lab 1: Understanding the problems with modulo hashing',
-    version: '1.0.0',
+    name: 'Consistent Hashing Cache API',
+    description: 'Lab 2: Solving the scale-up problem with consistent hashing',
+    version: '2.0.0',
     coordinator: coordInfo.success ? coordInfo.data : 'unavailable',
     endpoints: {
       'POST /cache': 'Set a value (body: { key, value, ttl? })',
@@ -154,7 +154,7 @@ app.get('/', async (req, res) => {
       'GET /stats': 'Get cache statistics',
       'GET /distribution': 'See key distribution',
       'GET /mappings': 'Get all key-to-node mappings',
-      'POST /hash': 'Get hash for a key (body: { key })',
+      'GET /ring': 'Visualize the hash ring',
       'GET /health': 'Health check'
     }
   });
