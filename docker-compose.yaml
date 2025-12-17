@@ -58,6 +58,7 @@ services:
       - redis-node-0
       - redis-node-1
       - redis-node-2
+      # - redis-node-3
     networks:
       - cache-network
     restart: unless-stopped
