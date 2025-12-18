@@ -1,20 +1,24 @@
 const crypto = require('crypto');
 const redis = require('redis');
 
-class ConsistentHashRing {
-  constructor(redisNodes) {
+class ConsistentHashRingWithVNodes {
+  constructor(redisNodes, virtualNodeCount = 150) {
     this.hashSpace = Math.pow(2, 32); // 4,294,967,296 positions
     this.nodeCount = redisNodes.length;
+    this.virtualNodeCount = virtualNodeCount;
     
-    // Store node positions and Redis clients
-    this.ring = new Map();        // position -> node name
-    this.nodes = new Map();       // node name -> { id, client, host, port }
-    this.sortedKeys = [];         // sorted array of positions
+    // Store mappings
+    this.ring = new Map();              // position -> physical node name
+    this.nodes = new Map();             // node name -> { id, client, host, port }
+    this.sortedKeys = [];               // sorted array of all virtual node positions
+    this.virtualNodeMap = new Map();    // node name -> [virtual positions]
     
-    console.log(`[ConsistentHashRing] Initializing with ${this.nodeCount} Redis nodes`);
-    console.log(`[ConsistentHashRing] Hash space: 0 to ${this.hashSpace - 1}`);
+    console.log(`[VNodeHashRing] Initializing with ${this.nodeCount} Redis nodes`);
+    console.log(`[VNodeHashRing] Virtual nodes per node: ${this.virtualNodeCount}`);
+    console.log(`[VNodeHashRing] Total virtual nodes: ${this.nodeCount * this.virtualNodeCount}`);
+    console.log(`[VNodeHashRing] Hash space: 0 to ${this.hashSpace - 1}`);
     
-    // Create Redis clients and add to ring
+    // Create Redis clients and add virtual nodes to ring
     redisNodes.forEach((nodeConfig, index) => {
       this.addNode(index, nodeConfig);
     });
@@ -35,7 +39,7 @@ class ConsistentHashRing {
   }
 
   /**
-   * Add a Redis node to the ring
+   * Add a Redis node with virtual nodes to the ring
    */
   addNode(id, nodeConfig) {
     const nodeName = `cache_node_${id}`;
@@ -49,11 +53,11 @@ class ConsistentHashRing {
     });
 
     client.on('error', (err) => {
-      console.error(`[ConsistentHashRing] Redis error on ${nodeName}:`, err);
+      console.error(`[VNodeHashRing] Redis error on ${nodeName}:`, err);
     });
 
     client.on('connect', () => {
-      console.log(`[ConsistentHashRing] Connected to ${nodeName} at ${nodeConfig.host}:${nodeConfig.port}`);
+      console.log(`[VNodeHashRing] Connected to ${nodeName} at ${nodeConfig.host}:${nodeConfig.port}`);
     });
 
     // Store node information
@@ -65,28 +69,38 @@ class ConsistentHashRing {
       client: client
     });
 
-    // Calculate position on the ring
-    const position = this.hashFunction(nodeName);
+    // Create virtual nodes
+    const virtualPositions = [];
     
-    // Check for collision (unlikely but possible)
-    if (this.ring.has(position)) {
-      console.warn(`[ConsistentHashRing] Collision at position ${position} for ${nodeName}`);
-      // In production, you'd handle this by rehashing with a salt
-      return;
+    for (let i = 0; i < this.virtualNodeCount; i++) {
+      const virtualNodeName = `${nodeName}:vnode${i}`;
+      let position = this.hashFunction(virtualNodeName);
+      
+      // Handle collisions (rare but possible)
+      // Simply increment position until we find an empty spot
+      while (this.ring.has(position)) {
+        position = (position + 1) % this.hashSpace;
+      }
+      
+      // Add virtual node to ring (maps to physical node)
+      this.ring.set(position, nodeName);
+      virtualPositions.push(position);
+      
+      // Add to sorted keys
+      this.sortedKeys.push(position);
     }
     
-    // Add to ring
-    this.ring.set(position, nodeName);
-    
-    // Add to sorted keys and keep sorted
-    this.sortedKeys.push(position);
+    // Keep sorted keys sorted
     this.sortedKeys.sort((a, b) => a - b);
     
-    console.log(`[ConsistentHashRing] Added ${nodeName} at position ${position}`);
+    // Store virtual positions for this physical node
+    this.virtualNodeMap.set(nodeName, virtualPositions);
+    
+    console.log(`[VNodeHashRing] Added ${nodeName} with ${virtualPositions.length} virtual nodes`);
   }
 
   /**
-   * Remove a Redis node from the ring
+   * Remove a Redis node (and all its virtual nodes) from the ring
    */
   async removeNode(nodeName) {
     const nodeInfo = this.nodes.get(nodeName);
@@ -94,36 +108,40 @@ class ConsistentHashRing {
       throw new Error(`Node ${nodeName} not found`);
     }
 
-    // Find the position of this node
-    let position = null;
-    for (let [pos, name] of this.ring.entries()) {
-      if (name === nodeName) {
-        position = pos;
-        break;
-      }
+    // Get all virtual positions for this node
+    const virtualPositions = this.virtualNodeMap.get(nodeName);
+    if (!virtualPositions) {
+      throw new Error(`Virtual positions for ${nodeName} not found`);
     }
 
-    if (position === null) {
-      throw new Error(`Position for ${nodeName} not found on ring`);
-    }
+    // Remove all virtual nodes from the ring
+    virtualPositions.forEach(position => {
+      this.ring.delete(position);
+    });
+
+    // Remove from sorted keys
+    this.sortedKeys = this.sortedKeys.filter(
+      pos => !virtualPositions.includes(pos)
+    );
 
     // Disconnect Redis client
     await nodeInfo.client.quit();
 
-    // Remove from ring
-    this.ring.delete(position);
-    
-    // Remove from sorted keys
-    this.sortedKeys = this.sortedKeys.filter(k => k !== position);
-    
-    // Remove from nodes
+    // Clean up
+    this.virtualNodeMap.delete(nodeName);
     this.nodes.delete(nodeName);
     
-    console.log(`[ConsistentHashRing] Removed ${nodeName} from position ${position}`);
+    console.log(`[VNodeHashRing] Removed ${nodeName} and its ${virtualPositions.length} virtual nodes`);
   }
 
   /**
-   * Find the Redis node responsible for a key using binary search
+   * Find the physical Redis node for a key
+   * 
+   * Process:
+   * 1. Hash the key to get its position
+   * 2. Binary search to find the first virtual node >= key position
+   * 3. Look up which physical node owns that virtual node
+   * 4. Return the physical Redis node
    */
   getNodeForKey(key) {
     if (this.sortedKeys.length === 0) {
@@ -133,7 +151,7 @@ class ConsistentHashRing {
     // Hash the key to find its position
     const keyPosition = this.hashFunction(key);
     
-    // Binary search for the first node >= keyPosition
+    // Binary search for the first virtual node >= keyPosition
     let left = 0;
     let right = this.sortedKeys.length;
 
@@ -151,29 +169,34 @@ class ConsistentHashRing {
       left = 0;
     }
 
-    const nodePosition = this.sortedKeys[left];
-    const nodeName = this.ring.get(nodePosition);
-    return this.nodes.get(nodeName);
+    // Get the virtual node position
+    const virtualNodePosition = this.sortedKeys[left];
+    
+    // Map virtual node to physical node
+    const physicalNodeName = this.ring.get(virtualNodePosition);
+    
+    // Return the physical Redis node
+    return this.nodes.get(physicalNodeName);
   }
 
   /**
    * Connect all Redis clients
    */
   async connect() {
-    console.log('[ConsistentHashRing] Connecting to all Redis nodes...');
+    console.log('[VNodeHashRing] Connecting to all Redis nodes...');
     const connectPromises = Array.from(this.nodes.values()).map(node => node.client.connect());
     await Promise.all(connectPromises);
-    console.log('[ConsistentHashRing] All Redis nodes connected');
+    console.log('[VNodeHashRing] All Redis nodes connected');
   }
 
   /**
    * Disconnect all Redis clients
    */
   async disconnect() {
-    console.log('[ConsistentHashRing] Disconnecting from all Redis nodes...');
+    console.log('[VNodeHashRing] Disconnecting from all Redis nodes...');
     const disconnectPromises = Array.from(this.nodes.values()).map(node => node.client.quit());
     await Promise.all(disconnectPromises);
-    console.log('[ConsistentHashRing] All Redis nodes disconnected');
+    console.log('[VNodeHashRing] All Redis nodes disconnected');
   }
 
   /**
@@ -198,7 +221,7 @@ class ConsistentHashRing {
         hash: this.hashFunction(key)
       };
     } catch (error) {
-      console.error(`[ConsistentHashRing] SET error on ${node.name}:`, error);
+      console.error(`[VNodeHashRing] SET error on ${node.name}:`, error);
       return {
         success: false,
         node: node.name,
@@ -244,7 +267,7 @@ class ConsistentHashRing {
         value: parsedValue
       };
     } catch (error) {
-      console.error(`[ConsistentHashRing] GET error on ${node.name}:`, error);
+      console.error(`[VNodeHashRing] GET error on ${node.name}:`, error);
       return {
         success: false,
         node: node.name,
@@ -271,7 +294,7 @@ class ConsistentHashRing {
         key: key
       };
     } catch (error) {
-      console.error(`[ConsistentHashRing] DELETE error on ${node.name}:`, error);
+      console.error(`[VNodeHashRing] DELETE error on ${node.name}:`, error);
       return {
         success: false,
         node: node.name,
@@ -305,6 +328,9 @@ class ConsistentHashRing {
           const total = hits + misses;
           const hitRate = total > 0 ? ((hits / total) * 100).toFixed(2) : '0.00';
 
+          // Count virtual nodes for this physical node
+          const virtualNodeCount = this.virtualNodeMap.get(node.name)?.length || 0;
+
           return {
             nodeId: node.id,
             nodeName: node.name,
@@ -313,10 +339,11 @@ class ConsistentHashRing {
             keys: keyCount,
             hits: hits,
             misses: misses,
-            hitRate: `${hitRate}%`
+            hitRate: `${hitRate}%`,
+            virtualNodes: virtualNodeCount
           };
         } catch (error) {
-          console.error(`[ConsistentHashRing] Stats error on ${node.name}:`, error);
+          console.error(`[VNodeHashRing] Stats error on ${node.name}:`, error);
           return {
             nodeId: node.id,
             nodeName: node.name,
@@ -339,6 +366,8 @@ class ConsistentHashRing {
       nodeCount: this.nodes.size,
       totalKeys: totalKeys,
       overallHitRate: `${overallHitRate}%`,
+      virtualNodesPerNode: this.virtualNodeCount,
+      totalVirtualNodes: this.sortedKeys.length,
       nodes: nodeStats
     };
   }
@@ -353,6 +382,7 @@ class ConsistentHashRing {
       nodeId: node.nodeId,
       nodeName: node.nodeName,
       keyCount: node.keys || 0,
+      virtualNodes: node.virtualNodes || 0,
       percentage: 0
     }));
 
@@ -384,7 +414,7 @@ class ConsistentHashRing {
             });
           });
         } catch (error) {
-          console.error(`[ConsistentHashRing] Keys error on ${node.name}:`, error);
+          console.error(`[VNodeHashRing] Keys error on ${node.name}:`, error);
         }
       })
     );
@@ -393,35 +423,50 @@ class ConsistentHashRing {
   }
 
   /**
-   * Visualize the ring (for debugging)
+   * Visualize the ring with virtual nodes
    */
   visualizeRing() {
-    const visualization = [];
+    // Group virtual nodes by physical node
+    const nodeRanges = new Map();
     
     this.sortedKeys.forEach((position, index) => {
-      const nodeName = this.ring.get(position);
+      const physicalNodeName = this.ring.get(position);
       const nextPosition = this.sortedKeys[(index + 1) % this.sortedKeys.length];
       
-      // Calculate the range this node covers
+      // Calculate range for this virtual node
       let range;
       if (nextPosition > position) {
         range = nextPosition - position;
       } else {
-        // Wrap around case
         range = (this.hashSpace - position) + nextPosition;
       }
       
+      // Add to physical node's total range
+      if (!nodeRanges.has(physicalNodeName)) {
+        nodeRanges.set(physicalNodeName, 0);
+      }
+      nodeRanges.set(physicalNodeName, nodeRanges.get(physicalNodeName) + range);
+    });
+
+    // Calculate percentages
+    const visualization = [];
+    nodeRanges.forEach((range, nodeName) => {
       const percentage = (range / this.hashSpace * 100).toFixed(2);
+      const virtualNodeCount = this.virtualNodeMap.get(nodeName)?.length || 0;
       
       visualization.push({
-        position: position,
         nodeName: nodeName,
+        virtualNodes: virtualNodeCount,
         rangeSize: range,
         percentage: percentage + '%'
       });
     });
 
-    return visualization;
+    return {
+      totalVirtualNodes: this.sortedKeys.length,
+      virtualNodesPerPhysicalNode: this.virtualNodeCount,
+      physicalNodes: visualization
+    };
   }
 
   /**
@@ -432,13 +477,13 @@ class ConsistentHashRing {
       Array.from(this.nodes.values()).map(async (node) => {
         try {
           await node.client.flushDb();
-          console.log(`[ConsistentHashRing] Cleared ${node.name}`);
+          console.log(`[VNodeHashRing] Cleared ${node.name}`);
         } catch (error) {
-          console.error(`[ConsistentHashRing] Clear error on ${node.name}:`, error);
+          console.error(`[VNodeHashRing] Clear error on ${node.name}:`, error);
         }
       })
     );
   }
 }
 
-module.exports = ConsistentHashRing;
+module.exports = ConsistentHashRingWithVNodes;

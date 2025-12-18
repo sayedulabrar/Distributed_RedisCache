@@ -1,5 +1,5 @@
 const express = require('express');
-const ConsistentHashRing = require('./ConsistentHashRing');
+const ConsistentHashRingWithVNodes = require('./ConsistentHashRingWithVNodes');
 
 const app = express();
 app.use(express.json());
@@ -14,13 +14,14 @@ const parseRedisNodes = () => {
 };
 
 const redisNodes = parseRedisNodes();
-const cacheRing = new ConsistentHashRing(redisNodes);
+const virtualNodeCount = parseInt(process.env.VIRTUAL_NODES || '150');
+const cacheRing = new ConsistentHashRingWithVNodes(redisNodes, virtualNodeCount);
 
 // Initialize Redis connections
 (async () => {
   try {
     await cacheRing.connect();
-    console.log('[Coordinator] All Redis connections established using consistent hashing');
+    console.log('[Coordinator] All Redis connections established with virtual nodes');
   } catch (error) {
     console.error('[Coordinator] Failed to connect to Redis:', error);
     process.exit(1);
@@ -121,6 +122,7 @@ app.get('/distribution', async (req, res) => {
     const distribution = await cacheRing.getDistribution();
     res.json({
       totalNodes: cacheRing.nodeCount,
+      virtualNodesPerNode: cacheRing.virtualNodeCount,
       distribution: distribution
     });
   } catch (error) {
@@ -156,14 +158,14 @@ app.get('/mappings', async (req, res) => {
   }
 });
 
-// GET /ring (New! Visualize the hash ring)
+// GET /ring
 app.get('/ring', (req, res) => {
   try {
     const visualization = cacheRing.visualizeRing();
     res.json({
       hashSpace: cacheRing.hashSpace,
       nodeCount: cacheRing.nodeCount,
-      ring: visualization
+      ...visualization
     });
   } catch (error) {
     res.status(500).json({
@@ -194,19 +196,23 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'coordinator',
-    algorithm: 'consistent-hashing',
+    algorithm: 'consistent-hashing-with-virtual-nodes',
     nodes: cacheRing.nodeCount,
+    virtualNodesPerNode: cacheRing.virtualNodeCount,
+    totalVirtualNodes: cacheRing.sortedKeys.length,
     hashSpace: cacheRing.hashSpace
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
-    name: 'Consistent Hashing Cache Coordinator',
-    description: 'Lab 2: Solving the scale-up problem with consistent hashing',
-    version: '2.0.0',
-    algorithm: 'consistent-hashing',
+    name: 'Virtual Nodes Cache Coordinator',
+    description: 'Lab 3: Perfect load distribution with virtual nodes',
+    version: '3.0.0',
+    algorithm: 'consistent-hashing-with-virtual-nodes',
     nodes: cacheRing.nodeCount,
+    virtualNodesPerNode: cacheRing.virtualNodeCount,
+    totalVirtualNodes: cacheRing.sortedKeys.length,
     hashSpace: cacheRing.hashSpace,
     endpoints: {
       'POST /cache': 'Set a value (body: { key, value, ttl? })',
@@ -216,7 +222,7 @@ app.get('/', (req, res) => {
       'GET /stats': 'Get cache statistics',
       'GET /distribution': 'See key distribution',
       'GET /mappings': 'Get all key-to-node mappings',
-      'GET /ring': 'Visualize the hash ring',
+      'GET /ring': 'Visualize the virtual node ring',
       'GET /health': 'Health check'
     }
   });
@@ -227,11 +233,13 @@ const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(60));
-  console.log('CONSISTENT HASHING COORDINATOR STARTED');
+  console.log('VIRTUAL NODES COORDINATOR STARTED');
   console.log('='.repeat(60));
   console.log(`Server: http://localhost:${PORT}`);
-  console.log(`Algorithm: Consistent Hashing`);
-  console.log(`Redis Nodes: ${cacheRing.nodeCount}`);
+  console.log(`Algorithm: Consistent Hashing with Virtual Nodes`);
+  console.log(`Physical Redis Nodes: ${cacheRing.nodeCount}`);
+  console.log(`Virtual Nodes per Node: ${cacheRing.virtualNodeCount}`);
+  console.log(`Total Virtual Nodes: ${cacheRing.sortedKeys.length}`);
   console.log(`Hash Space: 0 to ${cacheRing.hashSpace - 1}`);
   console.log('='.repeat(60) + '\n');
 });
