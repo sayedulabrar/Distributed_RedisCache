@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Redis Cache Nodes
   redis-node-0:
