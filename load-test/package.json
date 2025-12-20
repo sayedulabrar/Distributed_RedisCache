@@ -1,0 +1,12 @@
+{
+  "name": "cache-load-test",
+  "version": "1.0.0",
+  "description": "Load testing tool for distributed cache",
+  "main": "load-test.js",
+  "scripts": {
+    "test": "node load-test.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}

@@ -10,6 +10,11 @@ services:
       - redis-node-0-data:/data
     networks:
       - cache-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
   redis-node-1:
     image: redis:7-alpine
@@ -21,6 +26,11 @@ services:
       - redis-node-1-data:/data
     networks:
       - cache-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
   redis-node-2:
     image: redis:7-alpine
@@ -32,18 +42,11 @@ services:
       - redis-node-2-data:/data
     networks:
       - cache-network
-
-  # Uncomment for 4-node configuration
-  # redis-node-3:
-  #   image: redis:7-alpine
-  #   container_name: cache_node_3
-  #   ports:
-  #     - "6383:6379"
-  #   command: redis-server --appendonly yes
-  #   volumes:
-  #     - redis-node-3-data:/data
-  #   networks:
-  #     - cache-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
   # Coordinator Service with Virtual Nodes
   coordinator:
@@ -55,35 +58,111 @@ services:
       - NODE_ENV=production
       - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379
       - VIRTUAL_NODES=150
+      - PORT=3001
     depends_on:
-      - redis-node-0
-      - redis-node-1
-      - redis-node-2
-      # - redis-node-3
+      redis-node-0:
+        condition: service_healthy
+      redis-node-1:
+        condition: service_healthy
+      redis-node-2:
+        condition: service_healthy
     networks:
       - cache-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
-  # API Server
-  api-server:
+  # API Server Instances (3 replicas for high availability)
+  api-server-1:
     build: ./api-server
-    container_name: api_server
-    ports:
-      - "4000:4000"
+    container_name: api_server_1
     environment:
       - NODE_ENV=production
       - COORDINATOR_URL=http://coordinator:3001
+      - SERVER_ID=1
+      - PORT=4000
     depends_on:
-      - coordinator
+      coordinator:
+        condition: service_healthy
     networks:
       - cache-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  api-server-2:
+    build: ./api-server
+    container_name: api_server_2
+    environment:
+      - NODE_ENV=production
+      - COORDINATOR_URL=http://coordinator:3001
+      - SERVER_ID=2
+      - PORT=4000
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    networks:
+      - cache-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  api-server-3:
+    build: ./api-server
+    container_name: api_server_3
+    environment:
+      - NODE_ENV=production
+      - COORDINATOR_URL=http://coordinator:3001
+      - SERVER_ID=3
+      - PORT=4000
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    networks:
+      - cache-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Nginx Load Balancer
+  nginx:
+    build: ./nginx
+    container_name: nginx_load_balancer
+    ports:
+      - "80:80"
+      - "8080:8080"  # Nginx status page
+    depends_on:
+      api-server-1:
+        condition: service_healthy
+      api-server-2:
+        condition: service_healthy
+      api-server-3:
+        condition: service_healthy
+    networks:
+      - cache-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 volumes:
   redis-node-0-data:
   redis-node-1-data:
   redis-node-2-data:
-  # redis-node-3-data:
 
 networks:
   cache-network:
