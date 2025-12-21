@@ -1,11 +1,11 @@
 const express = require('express');
-const ConsistentHashRingWithVNodes = require('./ConsistentHashRingWithVNodes');
+const ConsistentHashRingWithReplication = require('./ConsistentHashRingWithReplication');
 
 const app = express();
 app.use(express.json());
 
-// Parse Redis nodes from environment variable
-const parseRedisNodes = () => {
+// Parse primary Redis nodes
+const parsePrimaryNodes = () => {
   const nodesStr = process.env.REDIS_NODES || 'localhost:6380,localhost:6381,localhost:6382';
   return nodesStr.split(',').map(node => {
     const [host, port] = node.trim().split(':');
@@ -13,15 +13,32 @@ const parseRedisNodes = () => {
   });
 };
 
-const redisNodes = parseRedisNodes();
+// Parse replica Redis nodes
+const parseReplicaNodes = () => {
+  const nodesStr = process.env.REDIS_REPLICAS || 'localhost:6390,localhost:6391,localhost:6392';
+  return nodesStr.split(',').map(node => {
+    const [host, port] = node.trim().split(':');
+    return { host, port: parseInt(port) };
+  });
+};
+
+const primaryNodes = parsePrimaryNodes();
+const replicaNodes = parseReplicaNodes();
 const virtualNodeCount = parseInt(process.env.VIRTUAL_NODES || '150');
-const cacheRing = new ConsistentHashRingWithVNodes(redisNodes, virtualNodeCount);
+const replicationMode = process.env.REPLICATION_MODE || 'async';
+
+const cacheRing = new ConsistentHashRingWithReplication(
+  primaryNodes,
+  replicaNodes,
+  virtualNodeCount,
+  replicationMode
+);
 
 // Initialize Redis connections
 (async () => {
   try {
     await cacheRing.connect();
-    console.log('[Coordinator] All Redis connections established with virtual nodes');
+    console.log('[Coordinator] All Redis connections established (primaries + replicas)');
   } catch (error) {
     console.error('[Coordinator] Failed to connect to Redis:', error);
     process.exit(1);
@@ -43,7 +60,7 @@ app.use((req, res, next) => {
 
 // POST /cache
 app.post('/cache', async (req, res) => {
-  const { key, value, ttl } = req.body;
+  const { key, value, ttl, replicationMode } = req.body;
 
   if (!key || value === undefined) {
     return res.status(400).json({
@@ -53,7 +70,7 @@ app.post('/cache', async (req, res) => {
   }
 
   try {
-    const result = await cacheRing.set(key, value, ttl);
+    const result = await cacheRing.set(key, value, ttl, replicationMode);
     
     if (result.success) {
       res.status(201).json(result);
@@ -116,6 +133,51 @@ app.get('/stats', async (req, res) => {
   }
 });
 
+// GET /replication/status
+app.get('/replication/status', async (req, res) => {
+  try {
+    const stats = await cacheRing.getAllStats();
+    
+    res.json({
+      overall: stats.replicationHealth,
+      mode: stats.replicationMode,
+      primaryKeys: stats.totalPrimaryKeys,
+      replicaKeys: stats.totalReplicaKeys,
+      keysInSync: stats.totalPrimaryKeys === stats.totalReplicaKeys,
+      nodes: stats.nodes.map(n => ({
+        name: n.nodeName,
+        primary: {
+          keys: n.primary?.keys || 0,
+          host: n.primary?.host
+        },
+        replica: {
+          keys: n.replica?.keys || 0,
+          host: n.replica?.host
+        },
+        replication: n.replication
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// GET /replication/lag
+app.get('/replication/lag', async (req, res) => {
+  try {
+    const lagInfo = await cacheRing.getReplicationLag();
+    res.json(lagInfo);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // GET /distribution
 app.get('/distribution', async (req, res) => {
   try {
@@ -123,6 +185,7 @@ app.get('/distribution', async (req, res) => {
     res.json({
       totalNodes: cacheRing.nodeCount,
       virtualNodesPerNode: cacheRing.virtualNodeCount,
+      replicationMode: cacheRing.replicationMode,
       distribution: distribution
     });
   } catch (error) {
@@ -165,6 +228,7 @@ app.get('/ring', (req, res) => {
     res.json({
       hashSpace: cacheRing.hashSpace,
       nodeCount: cacheRing.nodeCount,
+      replicationMode: cacheRing.replicationMode,
       ...visualization
     });
   } catch (error) {
@@ -196,8 +260,9 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'coordinator',
-    algorithm: 'consistent-hashing-with-virtual-nodes',
+    algorithm: 'consistent-hashing-with-replication',
     nodes: cacheRing.nodeCount,
+    replicationMode: cacheRing.replicationMode,
     virtualNodesPerNode: cacheRing.virtualNodeCount,
     totalVirtualNodes: cacheRing.sortedKeys.length,
     hashSpace: cacheRing.hashSpace
@@ -206,20 +271,23 @@ app.get('/health', (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({
-    name: 'Virtual Nodes Cache Coordinator',
-    description: 'Lab 3: Perfect load distribution with virtual nodes',
-    version: '3.0.0',
-    algorithm: 'consistent-hashing-with-virtual-nodes',
+    name: 'Replication-Aware Cache Coordinator',
+    description: 'Lab 4: Master-replica replication with CAP theorem',
+    version: '4.0.0',
+    algorithm: 'consistent-hashing-with-replication',
     nodes: cacheRing.nodeCount,
+    replicationMode: cacheRing.replicationMode,
     virtualNodesPerNode: cacheRing.virtualNodeCount,
     totalVirtualNodes: cacheRing.sortedKeys.length,
     hashSpace: cacheRing.hashSpace,
     endpoints: {
-      'POST /cache': 'Set a value (body: { key, value, ttl? })',
+      'POST /cache': 'Set a value (body: { key, value, ttl?, replicationMode? })',
       'GET /cache/:key': 'Get a value',
       'DELETE /cache/:key': 'Delete a key',
       'DELETE /cache': 'Clear all nodes',
-      'GET /stats': 'Get cache statistics',
+      'GET /stats': 'Get cache statistics with replication info',
+      'GET /replication/status': 'Get replication status',
+      'GET /replication/lag': 'Get replication lag details',
       'GET /distribution': 'See key distribution',
       'GET /mappings': 'Get all key-to-node mappings',
       'GET /ring': 'Visualize the virtual node ring',
@@ -233,11 +301,12 @@ const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(60));
-  console.log('VIRTUAL NODES COORDINATOR STARTED');
+  console.log('REPLICATION-AWARE COORDINATOR STARTED');
   console.log('='.repeat(60));
   console.log(`Server: http://localhost:${PORT}`);
-  console.log(`Algorithm: Consistent Hashing with Virtual Nodes`);
+  console.log(`Algorithm: Consistent Hashing with Replication`);
   console.log(`Physical Redis Nodes: ${cacheRing.nodeCount}`);
+  console.log(`Replication Mode: ${cacheRing.replicationMode}`);
   console.log(`Virtual Nodes per Node: ${cacheRing.virtualNodeCount}`);
   console.log(`Total Virtual Nodes: ${cacheRing.sortedKeys.length}`);
   console.log(`Hash Space: 0 to ${cacheRing.hashSpace - 1}`);

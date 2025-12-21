@@ -1,54 +1,121 @@
 services:
-  # Redis Cache Nodes
-  redis-node-0:
+  redis-node-0-primary:
     image: redis:7-alpine
-    container_name: cache_node_0
+    container_name: cache_node_0_primary
     ports:
       - "6380:6379"
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --replica-read-only no
     volumes:
-      - redis-node-0-data:/data
+      - redis-node-0-primary-data:/data
     networks:
       - cache-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 3
+      retries: 5
 
-  redis-node-1:
+  redis-node-1-primary:
     image: redis:7-alpine
-    container_name: cache_node_1
+    container_name: cache_node_1_primary
     ports:
       - "6381:6379"
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --replica-read-only no
     volumes:
-      - redis-node-1-data:/data
+      - redis-node-1-primary-data:/data
     networks:
       - cache-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 3
+      retries: 5
 
-  redis-node-2:
+  redis-node-2-primary:
     image: redis:7-alpine
-    container_name: cache_node_2
+    container_name: cache_node_2_primary
     ports:
       - "6382:6379"
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --replica-read-only no
     volumes:
-      - redis-node-2-data:/data
+      - redis-node-2-primary-data:/data
     networks:
       - cache-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 3
+      retries: 5
+  
+  redis-node-0-replica:
+    image: redis:7-alpine
+    container_name: cache_node_0_replica
+    ports:
+      - "6390:6379"
+    command: >
+      redis-server 
+      --replicaof cache_node_0_primary 6379
+      --appendonly yes
+      --replica-read-only yes
+    volumes:
+      - redis-node-0-replica-data:/data
+    depends_on:
+      redis-node-0-primary:
+        condition: service_healthy
+    networks:
+      - cache-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
-  # Coordinator Service with Virtual Nodes
+  redis-node-1-replica:
+    image: redis:7-alpine
+    container_name: cache_node_1_replica
+    ports:
+      - "6391:6379"
+    command: >
+      redis-server 
+      --replicaof cache_node_1_primary 6379
+      --appendonly yes
+      --replica-read-only yes
+    volumes:
+      - redis-node-1-replica-data:/data
+    depends_on:
+      redis-node-1-primary:
+        condition: service_healthy
+    networks:
+      - cache-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-node-2-replica:
+    image: redis:7-alpine
+    container_name: cache_node_2_replica
+    ports:
+      - "6392:6379"
+    command: >
+      redis-server 
+      --replicaof cache_node_2_primary 6379
+      --appendonly yes
+      --replica-read-only yes
+    volumes:
+      - redis-node-2-replica-data:/data
+    depends_on:
+      redis-node-2-primary:
+        condition: service_healthy
+    networks:
+      - cache-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+  
   coordinator:
     build: ./coordinator
     container_name: coordinator_service
@@ -56,15 +123,23 @@ services:
       - "3001:3001"
     environment:
       - NODE_ENV=production
-      - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379
+      - REDIS_NODES=cache_node_0_primary:6379,cache_node_1_primary:6379,cache_node_2_primary:6379
+      - REDIS_REPLICAS=cache_node_0_replica:6379,cache_node_1_replica:6379,cache_node_2_replica:6379
       - VIRTUAL_NODES=150
+      - REPLICATION_MODE=async
       - PORT=3001
     depends_on:
-      redis-node-0:
+      redis-node-0-primary:
         condition: service_healthy
-      redis-node-1:
+      redis-node-1-primary:
         condition: service_healthy
-      redis-node-2:
+      redis-node-2-primary:
+        condition: service_healthy
+      redis-node-0-replica:
+        condition: service_healthy
+      redis-node-1-replica:
+        condition: service_healthy
+      redis-node-2-replica:
         condition: service_healthy
     networks:
       - cache-network
@@ -74,8 +149,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-
-  # API Server Instances (3 replicas for high availability)
+  
   api-server-1:
     build: ./api-server
     container_name: api_server_1
@@ -135,8 +209,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-
-  # Nginx Load Balancer
+  
   nginx:
     build: ./nginx
     container_name: nginx_load_balancer
@@ -160,9 +233,12 @@ services:
       retries: 3
 
 volumes:
-  redis-node-0-data:
-  redis-node-1-data:
-  redis-node-2-data:
+  redis-node-0-primary-data:
+  redis-node-1-primary-data:
+  redis-node-2-primary-data:
+  redis-node-0-replica-data:
+  redis-node-1-replica-data:
+  redis-node-2-replica-data:
 
 networks:
   cache-network:

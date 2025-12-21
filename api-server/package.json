@@ -1,6 +1,6 @@
 {
   "name": "distributed-cache-api-server",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "Production API server with load balancing and metrics",
   "main": "server.js",
   "scripts": {

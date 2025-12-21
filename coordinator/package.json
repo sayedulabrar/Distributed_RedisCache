@@ -1,6 +1,6 @@
 {
   "name": "vnode-coordinator-service",
-  "version": "3.0.0",
+  "version": "5.0.0",
   "description": "Virtual nodes coordinator for distributed Redis cache",
   "main": "coordinator.js",
   "scripts": {
