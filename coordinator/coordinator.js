@@ -4,7 +4,6 @@ const ConsistentHashRingWithReplication = require('./ConsistentHashRingWithRepli
 const app = express();
 app.use(express.json());
 
-// Parse primary Redis nodes
 const parsePrimaryNodes = () => {
   const nodesStr = process.env.REDIS_NODES || 'localhost:6380,localhost:6381,localhost:6382';
   return nodesStr.split(',').map(node => {
@@ -13,7 +12,6 @@ const parsePrimaryNodes = () => {
   });
 };
 
-// Parse replica Redis nodes
 const parseReplicaNodes = () => {
   const nodesStr = process.env.REDIS_REPLICAS || 'localhost:6390,localhost:6391,localhost:6392';
   return nodesStr.split(',').map(node => {
@@ -38,9 +36,11 @@ const cacheRing = new ConsistentHashRingWithReplication(
 (async () => {
   try {
     await cacheRing.connect();
-    console.log('[Coordinator] All Redis connections established (primaries + replicas)');
+    console.log('[Coordinator] All Redis connections established');
+    console.log('[Coordinator] Health monitoring active');
+    console.log('[Coordinator] Failover manager ready');
   } catch (error) {
-    console.error('[Coordinator] Failed to connect to Redis:', error);
+    console.error('[Coordinator] Failed to connect:', error);
     process.exit(1);
   }
 })();
@@ -57,7 +57,6 @@ app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
-
 // POST /cache
 app.post('/cache', async (req, res) => {
   const { key, value, ttl, replicationMode } = req.body;
@@ -85,7 +84,6 @@ app.post('/cache', async (req, res) => {
   }
 });
 
-// GET /cache/:key
 app.get('/cache/:key', async (req, res) => {
   const { key } = req.params;
 
@@ -105,7 +103,6 @@ app.get('/cache/:key', async (req, res) => {
   }
 });
 
-// DELETE /cache/:key
 app.delete('/cache/:key', async (req, res) => {
   const { key } = req.params;
 
@@ -120,7 +117,128 @@ app.delete('/cache/:key', async (req, res) => {
   }
 });
 
-// GET /stats
+app.delete('/cache', async (req, res) => {
+  try {
+    await cacheRing.clearAll();
+    res.json({
+      success: true,
+      message: 'All cache nodes cleared'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// GET /health/nodes - Node health status
+app.get('/health/nodes', (req, res) => {
+  try {
+    const status = cacheRing.healthMonitor.getAllNodeStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// GET /health/history - Health check event log
+app.get('/health/history', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    const history = cacheRing.healthMonitor.getHealthHistory(limit);
+    res.json({
+      events: history,
+      count: history.length
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// GET /health/summary - Health summary
+app.get('/health/summary', (req, res) => {
+  try {
+    const summary = cacheRing.healthMonitor.getHealthSummary();
+    res.json(summary);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// GET /failover/status - Current failover state
+app.get('/failover/status', (req, res) => {
+  try {
+    const metrics = cacheRing.failoverManager.getFailoverMetrics();
+    res.json(metrics);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// POST /failover/:nodeId/trigger - Manual failover trigger (testing)
+app.post('/failover/:nodeId/trigger', async (req, res) => {
+  try {
+    const nodeName = `cache_node_${req.params.nodeId}`;
+    const result = await cacheRing.failoverManager.failoverToReplica(nodeName);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// GET /system/status - Overall system health
+app.get('/system/status', async (req, res) => {
+  try {
+    const nodeStatus = cacheRing.healthMonitor.getAllNodeStatus();
+    const healthSummary = cacheRing.healthMonitor.getHealthSummary();
+    const failoverMetrics = cacheRing.failoverManager.getFailoverMetrics();
+    const stats = await cacheRing.getAllStats();
+    
+    res.json({
+      overall: healthSummary.overallHealth,
+      timestamp: new Date().toISOString(),
+      health: {
+        totalNodes: healthSummary.totalNodes,
+        healthy: healthSummary.healthy,
+        failed: healthSummary.failed,
+        failedOver: healthSummary.failedOver,
+        availability: `${((healthSummary.healthy + healthSummary.failedOver) / healthSummary.totalNodes * 100).toFixed(1)}%`
+      },
+      cache: {
+        totalKeys: stats.totalPrimaryKeys,
+        replicationHealth: stats.replicationHealth
+      },
+      failover: {
+        totalFailovers: failoverMetrics.totalFailovers,
+        successfulFailovers: failoverMetrics.successfulFailovers,
+        averageFailoverTime: failoverMetrics.averageFailoverTime
+      },
+      nodes: nodeStatus
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.get('/stats', async (req, res) => {
   try {
     const stats = await cacheRing.getAllStats();
@@ -133,7 +251,6 @@ app.get('/stats', async (req, res) => {
   }
 });
 
-// GET /replication/status
 app.get('/replication/status', async (req, res) => {
   try {
     const stats = await cacheRing.getAllStats();
@@ -165,7 +282,6 @@ app.get('/replication/status', async (req, res) => {
   }
 });
 
-// GET /replication/lag
 app.get('/replication/lag', async (req, res) => {
   try {
     const lagInfo = await cacheRing.getReplicationLag();
@@ -178,7 +294,6 @@ app.get('/replication/lag', async (req, res) => {
   }
 });
 
-// GET /distribution
 app.get('/distribution', async (req, res) => {
   try {
     const distribution = await cacheRing.getDistribution();
@@ -196,7 +311,6 @@ app.get('/distribution', async (req, res) => {
   }
 });
 
-// GET /mappings
 app.get('/mappings', async (req, res) => {
   try {
     const mappings = await cacheRing.getKeyMappings();
@@ -221,7 +335,6 @@ app.get('/mappings', async (req, res) => {
   }
 });
 
-// GET /ring
 app.get('/ring', (req, res) => {
   try {
     const visualization = cacheRing.visualizeRing();
@@ -239,77 +352,83 @@ app.get('/ring', (req, res) => {
   }
 });
 
-// DELETE /cache
-app.delete('/cache', async (req, res) => {
-  try {
-    await cacheRing.clearAll();
-    res.json({
-      success: true,
-      message: 'All cache nodes cleared'
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Health check
 app.get('/health', (req, res) => {
+  const healthSummary = cacheRing.healthMonitor.getHealthSummary();
+  
   res.json({
-    status: 'healthy',
+    status: healthSummary.overallHealth,
     service: 'coordinator',
-    algorithm: 'consistent-hashing-with-replication',
-    nodes: cacheRing.nodeCount,
-    replicationMode: cacheRing.replicationMode,
-    virtualNodesPerNode: cacheRing.virtualNodeCount,
-    totalVirtualNodes: cacheRing.sortedKeys.length,
-    hashSpace: cacheRing.hashSpace
-  });
-});
-
-app.get('/', (req, res) => {
-  res.json({
-    name: 'Replication-Aware Cache Coordinator',
-    description: 'Lab 4: Master-replica replication with CAP theorem',
-    version: '4.0.0',
-    algorithm: 'consistent-hashing-with-replication',
+    algorithm: 'consistent-hashing-with-failover',
     nodes: cacheRing.nodeCount,
     replicationMode: cacheRing.replicationMode,
     virtualNodesPerNode: cacheRing.virtualNodeCount,
     totalVirtualNodes: cacheRing.sortedKeys.length,
     hashSpace: cacheRing.hashSpace,
+    healthMonitoring: 'active',
+    failoverCapability: 'enabled'
+  });
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Self-Healing Cache Coordinator',
+    description: 'Automatic failure detection and recovery',
+    version: '6.0.0',
+    algorithm: 'consistent-hashing-with-automatic-failover',
+    features: [
+      'Automatic failure detection',
+      'Read failover to replicas',
+      'Automatic replica promotion',
+      'Primary recovery handling',
+      'Health monitoring dashboard'
+    ],
+    nodes: cacheRing.nodeCount,
+    replicationMode: cacheRing.replicationMode,
+    virtualNodesPerNode: cacheRing.virtualNodeCount,
     endpoints: {
-      'POST /cache': 'Set a value (body: { key, value, ttl?, replicationMode? })',
-      'GET /cache/:key': 'Get a value',
+      // Cache operations
+      'POST /cache': 'Set a value',
+      'GET /cache/:key': 'Get a value (with automatic failover)',
       'DELETE /cache/:key': 'Delete a key',
       'DELETE /cache': 'Clear all nodes',
-      'GET /stats': 'Get cache statistics with replication info',
-      'GET /replication/status': 'Get replication status',
-      'GET /replication/lag': 'Get replication lag details',
-      'GET /distribution': 'See key distribution',
-      'GET /mappings': 'Get all key-to-node mappings',
-      'GET /ring': 'Visualize the virtual node ring',
-      'GET /health': 'Health check'
+      
+      // Health monitoring
+      'GET /health/nodes': 'Node health status',
+      'GET /health/history': 'Health check event log',
+      'GET /health/summary': 'Health summary',
+      
+      // Failover management
+      'GET /failover/status': 'Failover metrics',
+      'POST /failover/:nodeId/trigger': 'Manual failover (testing)',
+      
+      // System status
+      'GET /system/status': 'Overall system health',
+      
+      // Replication and mapping endpoints
+      'GET /stats': 'Cache statistics',
+      'GET /replication/status': 'Replication status',
+      'GET /replication/lag': 'Replication lag',
+      'GET /distribution': 'Key distribution',
+      'GET /mappings': 'Key-to-node mappings',
+      'GET /ring': 'Hash ring visualization',
+      'GET /health': 'Service health check'
     }
   });
 });
 
-// Start server
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(60));
-  console.log('REPLICATION-AWARE COORDINATOR STARTED');
+  console.log('SELF-HEALING CACHE COORDINATOR STARTED');
   console.log('='.repeat(60));
   console.log(`Server: http://localhost:${PORT}`);
-  console.log(`Algorithm: Consistent Hashing with Replication`);
+  console.log(`Algorithm: Consistent Hashing with Automatic Failover`);
   console.log(`Physical Redis Nodes: ${cacheRing.nodeCount}`);
   console.log(`Replication Mode: ${cacheRing.replicationMode}`);
   console.log(`Virtual Nodes per Node: ${cacheRing.virtualNodeCount}`);
-  console.log(`Total Virtual Nodes: ${cacheRing.sortedKeys.length}`);
-  console.log(`Hash Space: 0 to ${cacheRing.hashSpace - 1}`);
+  console.log(`Health Monitoring: ACTIVE`);
+  console.log(`Failover Capability: ENABLED`);
   console.log('='.repeat(60) + '\n');
 });
 

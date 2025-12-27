@@ -1,35 +1,35 @@
 const crypto = require('crypto');
 const redis = require('redis');
+const HealthMonitor = require('./HealthMonitor');
+const FailoverManager = require('./FailoverManager');
 
 class ConsistentHashRingWithReplication {
   constructor(primaryNodes, replicaNodes, virtualNodeCount = 150, replicationMode = 'async') {
     this.hashSpace = Math.pow(2, 32);
     this.nodeCount = primaryNodes.length;
     this.virtualNodeCount = virtualNodeCount;
-    this.replicationMode = replicationMode; // 'async' or 'sync'
+    this.replicationMode = replicationMode;
     
-    this.ring = new Map();              // position -> node name
-    this.sortedKeys = [];               // sorted virtual node positions
-    this.virtualNodeMap = new Map();    // node name -> virtual positions
+    this.ring = new Map();
+    this.sortedKeys = [];
+    this.virtualNodeMap = new Map();
+    this.nodes = new Map();
     
-    // Replication structures
-    this.nodes = new Map();             // node name -> { id, primary, replica, config }
-    
-    console.log(`[ReplicationRing] Initializing with ${this.nodeCount} Redis nodes`);
-    console.log(`[ReplicationRing] Replication mode: ${this.replicationMode}`);
-    console.log(`[ReplicationRing] Virtual nodes per node: ${this.virtualNodeCount}`);
-    console.log(`[ReplicationRing] Total virtual nodes: ${this.nodeCount * this.virtualNodeCount}`);
+    console.log(`[HashRing] Initializing with ${this.nodeCount} Redis nodes`);
+    console.log(`[HashRing] Replication mode: ${this.replicationMode}`);
+    console.log(`[HashRing] Virtual nodes per node: ${this.virtualNodeCount}`);
     
     // Initialize primary-replica pairs
     primaryNodes.forEach((primaryConfig, index) => {
       const replicaConfig = replicaNodes[index];
       this.addNodeWithReplica(index, primaryConfig, replicaConfig);
     });
+
+    // Initialize health monitor and failover manager
+    this.healthMonitor = new HealthMonitor(this);
+    this.failoverManager = new FailoverManager(this);
   }
 
-  /**
-   * Hash function
-   */
   hashFunction(key) {
     const hash = crypto.createHash('sha256');
     hash.update(key);
@@ -38,45 +38,33 @@ class ConsistentHashRingWithReplication {
     return hashInt % this.hashSpace;
   }
 
-  /**
-   * Add a Redis node with primary and replica
-   */
   addNodeWithReplica(id, primaryConfig, replicaConfig) {
     const nodeName = `cache_node_${id}`;
     
-    // Create primary client
     const primaryClient = redis.createClient({
-      socket: {
-        host: primaryConfig.host,
-        port: primaryConfig.port
-      }
+      socket: { host: primaryConfig.host, port: primaryConfig.port }
     });
 
     primaryClient.on('error', (err) => {
-      console.error(`[ReplicationRing] Primary error on ${nodeName}:`, err);
+      console.error(`[HashRing] Primary error on ${nodeName}:`, err.message);
     });
 
     primaryClient.on('connect', () => {
-      console.log(`[ReplicationRing] Connected to ${nodeName} PRIMARY at ${primaryConfig.host}:${primaryConfig.port}`);
+      console.log(`[HashRing] Connected to ${nodeName} PRIMARY`);
     });
 
-    // Create replica client
     const replicaClient = redis.createClient({
-      socket: {
-        host: replicaConfig.host,
-        port: replicaConfig.port
-      }
+      socket: { host: replicaConfig.host, port: replicaConfig.port }
     });
 
     replicaClient.on('error', (err) => {
-      console.error(`[ReplicationRing] Replica error on ${nodeName}:`, err);
+      console.error(`[HashRing] Replica error on ${nodeName}:`, err.message);
     });
 
     replicaClient.on('connect', () => {
-      console.log(`[ReplicationRing] Connected to ${nodeName} REPLICA at ${replicaConfig.host}:${replicaConfig.port}`);
+      console.log(`[HashRing] Connected to ${nodeName} REPLICA`);
     });
 
-    // Store node information with both primary and replica
     this.nodes.set(nodeName, {
       id: id,
       name: nodeName,
@@ -92,15 +80,12 @@ class ConsistentHashRingWithReplication {
       }
     });
 
-    // Create virtual nodes
-    // Virtual nodes map to the node name (which contains both primary and replica)
+    // Add virtual nodes to ring
     const virtualPositions = [];
-    
     for (let i = 0; i < this.virtualNodeCount; i++) {
       const virtualNodeName = `${nodeName}:vnode${i}`;
       let position = this.hashFunction(virtualNodeName);
       
-      // Handle collisions
       while (this.ring.has(position)) {
         position = (position + 1) % this.hashSpace;
       }
@@ -113,20 +98,15 @@ class ConsistentHashRingWithReplication {
     this.sortedKeys.sort((a, b) => a - b);
     this.virtualNodeMap.set(nodeName, virtualPositions);
     
-    console.log(`[ReplicationRing] Added ${nodeName} with ${virtualPositions.length} virtual nodes (primary + replica)`);
+    console.log(`[HashRing] Added ${nodeName} with ${virtualPositions.length} virtual nodes`);
   }
 
-  /**
-   * Find the physical Redis node for a key (unchanged from Lab 3)
-   */
   getNodeForKey(key) {
     if (this.sortedKeys.length === 0) {
       throw new Error('No nodes available in ring');
     }
 
     const keyPosition = this.hashFunction(key);
-    
-    // Binary search
     let left = 0;
     let right = this.sortedKeys.length;
 
@@ -149,59 +129,174 @@ class ConsistentHashRingWithReplication {
     return this.nodes.get(physicalNodeName);
   }
 
-  /**
-   * Connect all Redis clients (primary and replica)
-   */
   async connect() {
-    console.log('[ReplicationRing] Connecting to all Redis nodes...');
+    console.log('[HashRing] Connecting to all Redis nodes...');
     
     const connectPromises = [];
-    
     this.nodes.forEach(node => {
       connectPromises.push(node.primary.client.connect());
       connectPromises.push(node.replica.client.connect());
     });
     
     await Promise.all(connectPromises);
-    console.log('[ReplicationRing] All Redis nodes connected (primaries + replicas)');
+    console.log('[HashRing] ✓ All Redis nodes connected');
+
+    // Start health monitoring after connections established
+    console.log('[HashRing] Starting health monitoring...');
+    this.healthMonitor.startMonitoring();
   }
 
-  /**
-   * Disconnect all Redis clients
-   */
   async disconnect() {
-    console.log('[ReplicationRing] Disconnecting from all Redis nodes...');
+    console.log('[HashRing] Disconnecting...');
+    
+    // Stop health monitoring first
+    this.healthMonitor.stop();
     
     const disconnectPromises = [];
-    
     this.nodes.forEach(node => {
-      disconnectPromises.push(node.primary.client.quit());
-      disconnectPromises.push(node.replica.client.quit());
+      disconnectPromises.push(node.primary.client.quit().catch(() => {}));
+      disconnectPromises.push(node.replica.client.quit().catch(() => {}));
     });
     
-    await Promise.all(disconnectPromises);
-    console.log('[ReplicationRing] All Redis nodes disconnected');
+    await Promise.allSettled(disconnectPromises);
+    console.log('[HashRing] ✓ Disconnected');
   }
 
   /**
-   * SET operation with replication support
+   * GET with automatic failover
+   */
+  async get(key) {
+    const node = this.getNodeForKey(key);
+    const startTime = Date.now();
+    
+    // Check if node is healthy
+    const isHealthy = this.healthMonitor.isHealthy(node.name);
+    
+    try {
+      if (isHealthy) {
+        // Try primary first
+        const value = await node.primary.client.get(key);
+        
+        const latency = Date.now() - startTime;
+        
+        if (value === null) {
+          return {
+            success: false,
+            key: key,
+            node: node.name,
+            nodeIndex: node.id,
+            reason: 'key_not_found',
+            source: 'primary',
+            latency: `${latency}ms`
+          };
+        }
+
+        let parsedValue;
+        try {
+          parsedValue = JSON.parse(value);
+        } catch {
+          parsedValue = value;
+        }
+
+        return {
+          success: true,
+          key: key,
+          value: parsedValue,
+          node: node.name,
+          nodeIndex: node.id,
+          source: 'primary',
+          latency: `${latency}ms`
+        };
+      } else {
+        // Primary is down - AUTOMATIC FAILOVER to replica
+        console.log(`[HashRing] Primary down for ${key}, reading from replica`);
+        const value = await node.replica.client.get(key);
+        const latency = Date.now() - startTime;
+        
+        if (value === null) {
+          return {
+            success: false,
+            key: key,
+            node: node.name,
+            nodeIndex: node.id,
+            reason: 'key_not_found',
+            source: 'replica',
+            failover: true,
+            latency: `${latency}ms`
+          };
+        }
+
+        let parsedValue;
+        try {
+          parsedValue = JSON.parse(value);
+        } catch {
+          parsedValue = value;
+        }
+
+        return {
+          success: true,
+          key: key,
+          value: parsedValue,
+          node: node.name,
+          nodeIndex: node.id,
+          source: 'replica',
+          failover: true,
+          warning: 'Primary unavailable, reading from replica',
+          latency: `${latency}ms`
+        };
+      }
+    } catch (error) {
+      // Both primary and replica failed
+      console.error(`[HashRing] Both primary and replica failed for ${key}`);
+      
+      const latency = Date.now() - startTime;
+      
+      return {
+        success: false,
+        key: key,
+        node: node.name,
+        nodeIndex: node.id,
+        error: 'Node completely unavailable',
+        latency: `${latency}ms`
+      };
+    }
+  }
+
+  /**
+   * SET with failover awareness
    */
   async set(key, value, ttl = null, mode = null) {
     const node = this.getNodeForKey(key);
     const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
     const effectiveMode = mode || this.replicationMode;
     
+    // Check if node is currently failing over
+    if (this.failoverManager.isNodeInFailover(node.name)) {
+      return {
+        success: false,
+        key: key,
+        node: node.name,
+        nodeIndex: node.id,
+        error: 'Node is in failover state',
+        retryAfter: '5 seconds',
+        reason: 'Promotion in progress, writes temporarily unavailable'
+      };
+    }
+    
     try {
       const startTime = Date.now();
       
-      // Step 1: Write to primary
+      // Get write target (could be original primary or promoted replica)
+      const writeTarget = this.failoverManager.getWriteTarget(node.name);
+      
+      // Write to current primary (original or promoted)
       if (ttl) {
-        await node.primary.client.setEx(key, ttl, valueStr);
+        await writeTarget.client.setEx(key, ttl, valueStr);
       } else {
-        await node.primary.client.set(key, valueStr);
+        await writeTarget.client.set(key, valueStr);
       }
       
-      // Step 2: Handle replication based on mode
+      // Handle replication if needed
       let replicationInfo = {
         mode: effectiveMode,
         replicas: 0,
@@ -209,17 +304,11 @@ class ConsistentHashRingWithReplication {
       };
       
       if (effectiveMode === 'sync') {
-        // Synchronous replication: wait for replica confirmation
         try {
-          const replicated = await node.primary.client.wait(1, 1000); // 1 replica, 1s timeout
+          const replicated = await writeTarget.client.wait(1, 1000);
           replicationInfo.replicas = replicated;
           replicationInfo.status = replicated >= 1 ? 'confirmed' : 'timeout';
-          
-          if (replicated < 1) {
-            console.warn(`[ReplicationRing] Sync replication timeout for key: ${key}`);
-          }
         } catch (error) {
-          console.error(`[ReplicationRing] Sync replication error:`, error);
           replicationInfo.status = 'error';
           replicationInfo.error = error.message;
         }
@@ -227,18 +316,23 @@ class ConsistentHashRingWithReplication {
       
       const latency = Date.now() - startTime;
       
+      // Check if this is a promoted replica
+      const failoverStatus = this.failoverManager.getNodeFailoverStatus(node.name);
+      const isPromoted = failoverStatus.promoted;
+      
       return {
         success: true,
         key: key,
         node: node.name,
         nodeIndex: node.id,
         hash: this.hashFunction(key),
+        target: isPromoted ? 'promoted_replica' : 'primary',
         replication: replicationInfo,
         latency: `${latency}ms`
       };
       
     } catch (error) {
-      console.error(`[ReplicationRing] SET error on ${node.name}:`, error);
+      console.error(`[HashRing] SET error on ${node.name}:`, error.message);
       return {
         success: false,
         key: key,
@@ -249,70 +343,12 @@ class ConsistentHashRingWithReplication {
     }
   }
 
-  /**
-   * GET operation (reads from primary only in Lab 4)
-   */
-  async get(key) {
-    const node = this.getNodeForKey(key);
-    
-    try {
-      const startTime = Date.now();
-      
-      // Read from primary (Lab 5 will add replica failover)
-      const value = await node.primary.client.get(key);
-      
-      const latency = Date.now() - startTime;
-      
-      if (value === null) {
-        return {
-          success: false,
-          key: key,
-          node: node.name,
-          nodeIndex: node.id,
-          reason: 'key_not_found',
-          source: 'primary',
-          latency: `${latency}ms`
-        };
-      }
-
-      let parsedValue;
-      try {
-        parsedValue = JSON.parse(value);
-      } catch {
-        parsedValue = value;
-      }
-
-      return {
-        success: true,
-        key: key,
-        value: parsedValue,
-        node: node.name,
-        nodeIndex: node.id,
-        source: 'primary',
-        latency: `${latency}ms`
-      };
-      
-    } catch (error) {
-      console.error(`[ReplicationRing] GET error on ${node.name}:`, error);
-      return {
-        success: false,
-        key: key,
-        node: node.name,
-        nodeIndex: node.id,
-        error: error.message
-      };
-    }
-  }
-
-  /**
-   * DELETE operation
-   */
   async delete(key) {
     const node = this.getNodeForKey(key);
     
     try {
-      // Delete from primary (replication handles replica)
-      const result = await node.primary.client.del(key);
+      const writeTarget = this.failoverManager.getWriteTarget(node.name);
+      const result = await writeTarget.client.del(key);
       
       return {
         success: result === 1,
@@ -321,7 +357,7 @@ class ConsistentHashRingWithReplication {
         nodeIndex: node.id
       };
     } catch (error) {
-      console.error(`[ReplicationRing] DELETE error on ${node.name}:`, error);
+      console.error(`[HashRing] DELETE error on ${node.name}:`, error.message);
       return {
         success: false,
         key: key,
@@ -332,30 +368,23 @@ class ConsistentHashRingWithReplication {
     }
   }
 
-  /**
-   * Get comprehensive statistics with replication info
-   */
   async getAllStats() {
     const nodeStats = await Promise.all(
       Array.from(this.nodes.values()).map(async (node) => {
         try {
-          // Get primary stats
           const primaryInfo = await node.primary.client.info('replication');
           const primaryKeyspace = await node.primary.client.info('keyspace');
           const primaryStats = await node.primary.client.info('stats');
           
-          // Get replica stats
           const replicaInfo = await node.replica.client.info('replication');
           const replicaKeyspace = await node.replica.client.info('keyspace');
           
-          // Parse key counts
           const primaryKeysMatch = primaryKeyspace.match(/db0:keys=(\d+)/);
           const replicaKeysMatch = replicaKeyspace.match(/db0:keys=(\d+)/);
           
           const primaryKeys = primaryKeysMatch ? parseInt(primaryKeysMatch[1]) : 0;
           const replicaKeys = replicaKeysMatch ? parseInt(replicaKeysMatch[1]) : 0;
           
-          // Parse hit/miss stats
           const hitsMatch = primaryStats.match(/keyspace_hits:(\d+)/);
           const missesMatch = primaryStats.match(/keyspace_misses:(\d+)/);
           
@@ -364,7 +393,6 @@ class ConsistentHashRingWithReplication {
           const total = hits + misses;
           const hitRate = total > 0 ? ((hits / total) * 100).toFixed(2) : '0.00';
           
-          // Check replication lag
           const replicaOffsetMatch = replicaInfo.match(/master_repl_offset:(\d+)/);
           const primaryOffsetMatch = primaryInfo.match(/master_repl_offset:(\d+)/);
           
@@ -372,7 +400,6 @@ class ConsistentHashRingWithReplication {
           const primaryOffset = primaryOffsetMatch ? parseInt(primaryOffsetMatch[1]) : 0;
           const replicationLag = Math.max(0, primaryOffset - replicaOffset);
           
-          // Check replication connection status
           const connectedReplicasMatch = primaryInfo.match(/connected_slaves:(\d+)/);
           const connectedReplicas = connectedReplicasMatch ? parseInt(connectedReplicasMatch[1]) : 0;
           
@@ -404,7 +431,7 @@ class ConsistentHashRingWithReplication {
           };
           
         } catch (error) {
-          console.error(`[ReplicationRing] Stats error on ${node.name}:`, error);
+          console.error(`[HashRing] Stats error on ${node.name}:`, error.message);
           return {
             nodeId: node.id,
             nodeName: node.name,
@@ -422,7 +449,6 @@ class ConsistentHashRingWithReplication {
       ? ((totalHits / (totalHits + totalMisses)) * 100).toFixed(2)
       : '0.00';
     
-    // Check overall replication health
     const allSynced = nodeStats.every(n => n.replication?.status === 'synced');
 
     return {
@@ -438,9 +464,6 @@ class ConsistentHashRingWithReplication {
     };
   }
 
-  /**
-   * Get replication lag details
-   */
   async getReplicationLag() {
     const stats = await this.getAllStats();
     
@@ -462,9 +485,6 @@ class ConsistentHashRingWithReplication {
     };
   }
 
-  /**
-   * Get distribution (unchanged from Lab 3, but now shows replication)
-   */
   async getDistribution() {
     const stats = await this.getAllStats();
     
@@ -489,9 +509,6 @@ class ConsistentHashRingWithReplication {
     return distribution;
   }
 
-  /**
-   * Get key mappings (unchanged from Lab 3)
-   */
   async getKeyMappings() {
     const mappings = new Map();
     
@@ -506,7 +523,7 @@ class ConsistentHashRingWithReplication {
             });
           });
         } catch (error) {
-          console.error(`[ReplicationRing] Keys error on ${node.name}:`, error);
+          console.error(`[HashRing] Keys error on ${node.name}:`, error.message);
         }
       })
     );
@@ -514,9 +531,6 @@ class ConsistentHashRingWithReplication {
     return mappings;
   }
 
-  /**
-   * Visualize ring
-   */
   visualizeRing() {
     const nodeRanges = new Map();
     
@@ -557,17 +571,14 @@ class ConsistentHashRingWithReplication {
     };
   }
 
-  /**
-   * Clear all nodes
-   */
   async clearAll() {
     await Promise.all(
       Array.from(this.nodes.values()).map(async (node) => {
         try {
           await node.primary.client.flushDb();
-          console.log(`[ReplicationRing] Cleared ${node.name} primary`);
+          console.log(`[HashRing] Cleared ${node.name} primary`);
         } catch (error) {
-          console.error(`[ReplicationRing] Clear error on ${node.name}:`, error);
+          console.error(`[HashRing] Clear error on ${node.name}:`, error.message);
         }
       })
     );
