@@ -169,47 +169,45 @@ class ConsistentHashRingWithReplication {
     const node = this.getNodeForKey(key);
     const startTime = Date.now();
     
-    // Check if node is healthy
-    const isHealthy = this.healthMonitor.isHealthy(node.name);
-    
+    // After failover, node.primary is the promoted replica (current active primary)
+    // Try reading from current primary first
     try {
-      if (isHealthy) {
-        // Try primary first
-        const value = await node.primary.client.get(key);
-        
-        const latency = Date.now() - startTime;
-        
-        if (value === null) {
-          return {
-            success: false,
-            key: key,
-            node: node.name,
-            nodeIndex: node.id,
-            reason: 'key_not_found',
-            source: 'primary',
-            latency: `${latency}ms`
-          };
-        }
-
-        let parsedValue;
-        try {
-          parsedValue = JSON.parse(value);
-        } catch {
-          parsedValue = value;
-        }
-
+      const value = await node.primary.client.get(key);
+      const latency = Date.now() - startTime;
+      
+      if (value === null) {
         return {
-          success: true,
+          success: false,
           key: key,
-          value: parsedValue,
           node: node.name,
           nodeIndex: node.id,
+          reason: 'key_not_found',
           source: 'primary',
           latency: `${latency}ms`
         };
-      } else {
-        // Primary is down - AUTOMATIC FAILOVER to replica
-        console.log(`[HashRing] Primary down for ${key}, reading from replica`);
+      }
+
+      let parsedValue;
+      try {
+        parsedValue = JSON.parse(value);
+      } catch {
+        parsedValue = value;
+      }
+
+      return {
+        success: true,
+        key: key,
+        value: parsedValue,
+        node: node.name,
+        nodeIndex: node.id,
+        source: 'primary',
+        latency: `${latency}ms`
+      };
+    } catch (primaryError) {
+      // Primary failed, try replica as fallback
+      console.log(`[HashRing] Primary failed for ${key}, trying replica`);
+      
+      try {
         const value = await node.replica.client.get(key);
         const latency = Date.now() - startTime;
         
@@ -244,21 +242,20 @@ class ConsistentHashRingWithReplication {
           warning: 'Primary unavailable, reading from replica',
           latency: `${latency}ms`
         };
+      } catch (replicaError) {
+        // Both primary and replica failed
+        console.error(`[HashRing] Both primary and replica failed for ${key}`);
+        const latency = Date.now() - startTime;
+        
+        return {
+          success: false,
+          key: key,
+          node: node.name,
+          nodeIndex: node.id,
+          error: 'Node completely unavailable',
+          latency: `${latency}ms`
+        };
       }
-    } catch (error) {
-      // Both primary and replica failed
-      console.error(`[HashRing] Both primary and replica failed for ${key}`);
-      
-      const latency = Date.now() - startTime;
-      
-      return {
-        success: false,
-        key: key,
-        node: node.name,
-        nodeIndex: node.id,
-        error: 'Node completely unavailable',
-        latency: `${latency}ms`
-      };
     }
   }
 

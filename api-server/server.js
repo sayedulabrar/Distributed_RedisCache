@@ -166,7 +166,7 @@ app.get('/cache/:key', async (req, res) => {
         success: true,
         key: key,
         value: localValue,
-        source: 'local-cache',
+        origin: 'local-cache',
         serverId: SERVER_ID
       });
     }
@@ -182,7 +182,7 @@ app.get('/cache/:key', async (req, res) => {
       
       res.json({
         ...response.data,
-        source: 'redis',
+        origin: 'redis',
         serverId: SERVER_ID
       });
     } else {
