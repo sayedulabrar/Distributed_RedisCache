@@ -13,8 +13,12 @@ class ModuloHashRing {
       const client = redis.createClient({
         socket: {
           host: nodeConfig.host,
-          port: nodeConfig.port
-        }
+          port: nodeConfig.port,
+          reconnectStrategy: (retries) => {
+            return Math.min(retries * 50, 500); // exponential backoff
+          }
+        },
+        maxRetriesPerRequest: 3  // max retries for individual commands
       });
 
       client.on('error', (err) => {
@@ -236,6 +240,7 @@ class ModuloHashRing {
       })
     );
 
+    // reduce((accumulator, currentValue) => accumulator + currentValue, initial_value);
     const totalKeys = nodeStats.reduce((sum, s) => sum + (s.keys || 0), 0);
     const totalHits = nodeStats.reduce((sum, s) => sum + (s.hits || 0), 0);
     const totalMisses = nodeStats.reduce((sum, s) => sum + (s.misses || 0), 0);
@@ -251,33 +256,53 @@ class ModuloHashRing {
     };
   }
 
+
   /**
    * Get distribution of keys across nodes
    */
   async getDistribution() {
     const stats = await this.getAllStats();
-    
-    const distribution = stats.nodes.map(node => ({
+
+    const totalKeys = stats.totalKeys;
+
+    return stats.nodes.map(node => ({
       nodeId: node.nodeId,
       nodeName: node.nodeName,
       keyCount: node.keys || 0,
-      percentage: 0
+      percentage: totalKeys > 0
+        ? ((node.keys || 0) / totalKeys * 100).toFixed(2)
+        : '0.00'
     }));
-
-    const totalKeys = distribution.reduce((sum, d) => sum + d.keyCount, 0);
-    
-    if (totalKeys > 0) {
-      distribution.forEach(d => {
-        d.percentage = ((d.keyCount / totalKeys) * 100).toFixed(2);
-      });
-    }
-
-    return distribution;
   }
 
+
   /**
-   * Get mapping of all keys to their nodes
+   * Get mapping of all keys to their nodes. Modern, safe, non-blocking version 
+   * async getKeyMappings() {
+      const mappings = new Map();
+
+      await Promise.all(
+        this.nodes.map(async (node) => {
+          try {
+            for await (const key of node.client.scanIterator({
+              MATCH: '*',
+              COUNT: 100
+            })) {
+              mappings.set(key, {
+                nodeIndex: node.id,
+                nodeName: node.name
+              });
+            }
+          } catch (error) {
+            console.error(`[ModuloHashRing] Keys error on ${node.name}:`, error);
+          }
+        })
+      );
+
+      return mappings;
+    }
    */
+
   async getKeyMappings() {
     const mappings = new Map();
     
@@ -302,12 +327,13 @@ class ModuloHashRing {
 
   /**
    * Clear all nodes
+   * Deletes all keys in the current DB using flushDb() .
    */
   async clearAll() {
     await Promise.all(
       this.nodes.map(async (node) => {
         try {
-          await node.client.flushDb();
+          await node.client.flushDb('ASYNC');
           console.log(`[ModuloHashRing] Cleared ${node.name}`);
         } catch (error) {
           console.error(`[ModuloHashRing] Clear error on ${node.name}:`, error);
