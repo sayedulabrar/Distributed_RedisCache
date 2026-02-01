@@ -6,7 +6,7 @@ app.use(express.json());
 
 // Parse Redis nodes from environment variable
 const parseRedisNodes = () => {
-  const nodesStr = process.env.REDIS_NODES || 'localhost:6380,localhost:6381,localhost:6382';
+  const nodesStr = process.env.REDIS_NODES || 'localhost:6380,localhost:6381,localhost:6382'; //we pass the environment var in docker compose
   return nodesStr.split(',').map(node => {
     const [host, port] = node.trim().split(':');
     return { host, port: parseInt(port) };
