@@ -73,3 +73,19 @@ Think:
 ---
 
 So yes — `Promise.all` is commonly used *with* parallel work, but it doesn’t create the parallelism itself. The function calls do.
+
+In `visualizeRing()` function of `ConsistentHashRing.js` think about it this way:
+
+Suppose your ring looks like this (`hashSpace = 100`):
+
+```
+Nodes at positions: 10, 40, 80
+```
+
+* Node at `10` covers keys from **80 → 10**? No, careful — ranges go **clockwise**:
+
+1. `10` → `40` covers **10 to 40**
+2. `40` → `80` covers **40 to 80**
+3. `80` → `10` covers **80 to 100** + **0 to 10** ✅ This is the wrap-around case
+
+Notice that `80 → 10` would always need wrap-around logic, whether or not any node was deleted.

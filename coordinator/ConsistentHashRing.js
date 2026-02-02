@@ -415,7 +415,7 @@ class ConsistentHashRing {
       if (nextPosition > position) {
         range = nextPosition - position;
       } else {
-        // Wrap around case
+        // Wrap around case. 
         range = (this.hashSpace - position) + nextPosition;
       }
       
@@ -446,7 +446,7 @@ class ConsistentHashRing {
         }
       })
     );
-  }
+  }  
 }
 
 module.exports = ConsistentHashRing;
