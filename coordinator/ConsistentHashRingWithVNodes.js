@@ -101,6 +101,7 @@ class ConsistentHashRingWithVNodes {
 
   /**
    * Remove a Redis node (and all its virtual nodes) from the ring
+   * Handles data migration from the removed node to the next responsible node
    */
   async removeNode(nodeName) {
     const nodeInfo = this.nodes.get(nodeName);
@@ -114,24 +115,119 @@ class ConsistentHashRingWithVNodes {
       throw new Error(`Virtual positions for ${nodeName} not found`);
     }
 
-    // Remove all virtual nodes from the ring
+    // STEP 1: Migrate data from the removed node to their new responsible nodes
+    console.log(`[VNodeHashRing] Starting data migration from ${nodeName}...`);
+    await this.migrateDataFromRemovedNode(nodeInfo, virtualPositions);
+
+    // STEP 2: Remove all virtual nodes from the ring
     virtualPositions.forEach(position => {
       this.ring.delete(position);
     });
 
-    // Remove from sorted keys
+    // STEP 3: Remove from sorted keys
     this.sortedKeys = this.sortedKeys.filter(
       pos => !virtualPositions.includes(pos)
     );
 
-    // Disconnect Redis client
+    // STEP 4: Disconnect Redis client
     await nodeInfo.client.quit();
 
-    // Clean up
+    // STEP 5: Clean up
     this.virtualNodeMap.delete(nodeName);
     this.nodes.delete(nodeName);
     
     console.log(`[VNodeHashRing] Removed ${nodeName} and its ${virtualPositions.length} virtual nodes`);
+  }
+
+  /**
+   * Migrate all data from a removed node to the next node clockwise in the ring
+   */
+  async migrateDataFromRemovedNode(nodeInfo, virtualPositions) {
+    try {
+      // Get all keys from the node being removed
+      const keys = await nodeInfo.client.keys('*');
+      
+      if (keys.length === 0) {
+        console.log(`[VNodeHashRing] No keys to migrate from ${nodeInfo.name}`);
+        return;
+      }
+
+      console.log(`[VNodeHashRing] Migrating ${keys.length} keys from ${nodeInfo.name}`);
+
+      let migratedCount = 0;
+      let failedCount = 0;
+
+      // For each virtual position of the removed node, find the next position clockwise
+      // All keys owned by this position go to the next position
+      const positionTransferMap = new Map();
+      
+      virtualPositions.forEach(position => {
+        // Find the index of this position in sortedKeys
+        const index = this.sortedKeys.indexOf(position);
+        if (index >= 0) {
+          // Get the next position clockwise
+          const nextIndex = (index + 1) % this.sortedKeys.length;
+          const nextPosition = this.sortedKeys[nextIndex];
+          const nextNodeName = this.ring.get(nextPosition);
+          
+          positionTransferMap.set(position, nextNodeName);
+        }
+      });
+
+      // Migrate all keys
+      for (const key of keys) {
+        try {
+          // Get the current value and TTL from the removed node
+          const value = await nodeInfo.client.get(key);
+          const ttl = await nodeInfo.client.ttl(key);
+          
+          // Find which virtual position of the removed node this key belongs to
+          const keyPosition = this.hashFunction(key);
+          
+          // Find the virtual position that owns this key (the one <= keyPosition, closest)
+          let owningPosition = null;
+          for (let i = virtualPositions.length - 1; i >= 0; i--) {
+            if (virtualPositions[i] <= keyPosition) {
+              owningPosition = virtualPositions[i];
+              break;
+            }
+          }
+          
+          // If no position found, use the largest position (wraps around)
+          if (owningPosition === null && virtualPositions.length > 0) {
+            owningPosition = virtualPositions[virtualPositions.length - 1];
+          }
+
+          // Get the next node for this position
+          const nextNodeName = positionTransferMap.get(owningPosition);
+          const nextNode = this.nodes.get(nextNodeName);
+
+          if (nextNode) {
+            // Migrate the key to the next node
+            if (ttl > 0) {
+              // Key has a TTL, preserve it
+              await nextNode.client.setEx(key, ttl, value);
+            } else {
+              // Key has no TTL (persistent)
+              await nextNode.client.set(key, value);
+            }
+
+            migratedCount++;
+            
+            // Delete from removed node
+            await nodeInfo.client.del(key);
+          }
+        } catch (error) {
+          console.error(`[VNodeHashRing] Failed to migrate key ${key}:`, error.message);
+          failedCount++;
+        }
+      }
+
+      console.log(`[VNodeHashRing] Migration complete: ${migratedCount} keys migrated, ${failedCount} failed`);
+    } catch (error) {
+      console.error(`[VNodeHashRing] Error during data migration:`, error);
+      throw new Error(`Failed to migrate data from ${nodeInfo.name}: ${error.message}`);
+    }
   }
 
   /**
