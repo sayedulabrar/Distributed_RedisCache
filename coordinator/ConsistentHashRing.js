@@ -23,16 +23,12 @@ class ConsistentHashRing {
   /**
    * Hash function using SHA-256
    * Returns a position in the range [0, 2^32 - 1]
+   * SHA-256 .digest('hex') returns hexadecimal, t convert to decimal we need to tell parseint what format it is, that's 16.
    */
   hashFunction(key) {
-    const hash = crypto.createHash('sha256');
-    hash.update(key);
-    const hashHex = hash.digest('hex');
-    
-    // Take first 8 characters (32 bits) and convert to integer
-    const hashInt = parseInt(hashHex.substring(0, 8), 16);
-    return hashInt % this.hashSpace;
+    return parseInt(crypto.createHash('sha256').update(key).digest('hex').slice(0, 8), 16) % this.hashSpace;
   }
+
 
   /**
    * Add a Redis node to the ring
@@ -124,34 +120,42 @@ class ConsistentHashRing {
 
   /**
    * Find the Redis node responsible for a key using binary search
+    // For first>= we will use 
+    //     if A[mid] >= target:
+    //         ans = mid
+    //         right = mid - 1   // search earlier
+    // but for Last element ≤ target
+    //     if A[mid] <= target:
+    //         ans = mid
+    //         left = mid + 1   // search later
    */
   getNodeForKey(key) {
     if (this.sortedKeys.length === 0) {
       throw new Error('No nodes available in ring');
     }
 
-    // Hash the key to find its position
     const keyPosition = this.hashFunction(key);
-    
-    // Binary search for the first node >= keyPosition
-    let left = 0;
-    let right = this.sortedKeys.length;
 
-    while (left < right) {
-      const mid = Math.floor((left + right) / 2);
-      if (this.sortedKeys[mid] < keyPosition) {
-        left = mid + 1;
+    let left = 0;
+    let right = this.sortedKeys.length - 1;
+    let ans = -1;
+
+    // lower-bound search: first >= target
+    while (left <= right) {
+      const mid = left + Math.floor((right - left) / 2);
+
+      if (this.sortedKeys[mid] >= keyPosition) {
+        ans = mid;          // candidate
+        right = mid - 1;   // keep searching left side
       } else {
-        right = mid;
+        left = mid + 1;
       }
     }
 
-    // Wrap around if we reached the end
-    if (left >= this.sortedKeys.length) {
-      left = 0;
-    }
+    // wrap-around if not found
+    if (ans === -1) ans = 0;
 
-    const nodePosition = this.sortedKeys[left];
+    const nodePosition = this.sortedKeys[ans];
     const nodeName = this.ring.get(nodePosition);
     return this.nodes.get(nodeName);
   }
