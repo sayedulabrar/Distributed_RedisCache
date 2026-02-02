@@ -11,6 +11,10 @@ class ConsistentHashRing {
     this.nodes = new Map();       // node name -> { id, client, host, port }
     this.sortedKeys = [];         // sorted array of positions
     
+    // For example, when you hash a key and get position 1500, you need to find which node should store it. 
+    // With sortedKeys sorted (e.g., [500, 1200, 2100, 3500]), you can binary search to find that 2100 is the first 
+    // position ≥ 1500, mapping the key to that node.
+
     console.log(`[ConsistentHashRing] Initializing with ${this.nodeCount} Redis nodes`);
     console.log(`[ConsistentHashRing] Hash space: 0 to ${this.hashSpace - 1}`);
     
