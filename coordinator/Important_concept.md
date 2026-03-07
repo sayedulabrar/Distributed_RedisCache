@@ -23,6 +23,8 @@ and
 # Keyspace
 db0:keys=4200,expires=1200,avg_ttl=987654
 ```
+one Redis server/container can contain multiple logical databases (db0, db1, etc.), and db0:keys=4200 means database 0 currently holds 4200 keys.By default, Redis has 16 databases (0–15).You can change this in `redis.conf`: `databases 16`
+
 
 Your code is calling:
 
