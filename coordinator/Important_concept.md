@@ -115,23 +115,7 @@ Use:
 when you need **all matches + groups**.
 
 
-### Non-capturing group
 
-If you don’t need a group:
-
-```js
-(?:...)
-```
-
-Prevents creating extra array entries.
-
-Example:
-
-```js
-/db(?:\d+):keys=(\d+)/
-```
-
----
 
 ### Redis example
 
@@ -176,20 +160,6 @@ for (const m of matches) {
 
 ---
 
----
-
-## Option B — manual parsing
-
-```js
-keyspace.split('\n')
-```
-
-But regex is cleaner.
-
----
-
----
-
 # Summary table
 
 | Method          | Multiple matches | Capture groups |
@@ -226,3 +196,91 @@ Always use:
 ```
 matchAll()
 ```
+
+
+### Non-capturing group
+
+If you don’t need a group:
+
+```js
+(?:...)
+```
+
+Prevents creating extra array entries.
+
+Example:
+
+```js
+/db(?:\d+):keys=(\d+)/
+```
+
+**Regex Notes**
+
+**1️⃣ Non-capturing group `(?: )`**
+
+Use `(?: ... )` when you **need grouping but don’t want to capture it**.
+
+Example:
+
+```
+/db(?:10|11|12):keys=(\d+)/
+```
+
+But if grouping isn't needed, just write it normally:
+
+```
+/db\d+:keys=(\d+)/
+```
+
+Rule:
+
+* `( )` → grouping **and** capturing
+* `(?: )` → grouping **without capturing**
+* no `()` → when grouping isn't needed
+
+---
+
+**2️⃣ Why parentheses are needed with `|`**
+
+`|` splits the **entire regex**, so grouping is required.
+
+Correct:
+
+```
+/db(10|11|12):keys=(\d+)/
+```
+
+Matches:
+
+```
+db10:keys=5
+db11:keys=7
+db12:keys=9
+```
+
+Wrong:
+
+```
+/db10|11|12:keys=(\d+)/
+```
+
+This actually means:
+
+```
+db10
+OR
+11
+OR
+12:keys=(\d+)
+```
+
+Rule:
+
+```
+prefix(alt1|alt2)suffix
+```
+
+Use parentheses when `|` should apply only to part of the pattern.
+
+
+---
