@@ -176,17 +176,6 @@ for (const m of matches) {
 
 ---
 
----
-
-## Option B — manual parsing
-
-```js
-keyspace.split('\n')
-```
-
-But regex is cleaner.
-
----
 
 ---
 
