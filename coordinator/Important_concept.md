@@ -160,6 +160,9 @@ for (const m of matches) {
 
 ---
 
+
+---
+
 # Summary table
 
 | Method          | Multiple matches | Capture groups |
