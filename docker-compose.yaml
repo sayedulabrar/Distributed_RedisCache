@@ -51,6 +51,10 @@ services:
     container_name: coordinator_service
     ports:
       - "3001:3001"
+    # Containers communicate inside the Docker network using service-name:container-port.
+    # Redis runs on its default port 6379 inside every container.
+    # Host ports (6380, 6381, 6382) are only for accessing Redis from the host machine. And they are different containers so it doesn't matter.
+    # Example: coordinator → redis-node-0:6379 (internal), host → localhost:6380
     environment:
       - NODE_ENV=production
       - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379
