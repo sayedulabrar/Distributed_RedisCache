@@ -148,7 +148,7 @@ class ConsistentHashRingWithVNodes {
     try {
       // Get all keys from the node being removed
       const keys = await nodeInfo.client.keys('*');
-      
+
       if (keys.length === 0) {
         console.log(`[VNodeHashRing] No keys to migrate from ${nodeInfo.name}`);
         return;
@@ -159,40 +159,81 @@ class ConsistentHashRingWithVNodes {
       let migratedCount = 0;
       let failedCount = 0;
 
-      // For each virtual position of the removed node, find the next position clockwise
-      // All keys owned by this position go to the next position
-      const positionTransferMap = new Map();
-      
-      virtualPositions.forEach(position => {
-        // Find the index of this position in sortedKeys
-        const index = this.sortedKeys.indexOf(position);
-        if (index >= 0) {
-          // Get the next position clockwise
-          const nextIndex = (index + 1) % this.sortedKeys.length;
-          const nextPosition = this.sortedKeys[nextIndex];
-          const nextNodeName = this.ring.get(nextPosition);
-          
-          positionTransferMap.set(position, nextNodeName);
-        }
-      });
+      // Determine which nodes have available memory
+      const availableNodes = new Set();
 
-      // Migrate all keys
+      for (const [name, node] of this.nodes) {
+        if (name === nodeInfo.name) continue;
+
+        try {
+          const info = await node.client.info('memory');
+
+          const used = parseInt(info.match(/used_memory:(\d+)/)[1]);
+          const max = parseInt(info.match(/maxmemory:(\d+)/)[1]);
+
+          if (max === 0 || used < max * 0.9) {
+            availableNodes.add(name);
+          }
+        } catch (err) {
+          console.warn(`[VNodeHashRing] Failed checking memory for ${name}`);
+        }
+      }
+
+      if (availableNodes.size === 0) {
+        throw new Error("No nodes available with free memory");
+      }
+
+      // Map removed virtual node → next valid node
+      const positionTransferMap = new Map();
+
+      for (const position of virtualPositions) {
+        const index = this.sortedKeys.indexOf(position);
+
+        if (index === -1) continue;
+
+        let nextNodeName = null;
+        let i = (index + 1) % this.sortedKeys.length;
+
+        // Traverse clockwise
+        while (i !== index) {
+          const candidatePosition = this.sortedKeys[i];
+          const candidateNodeName = this.ring.get(candidatePosition);
+
+          if (
+            candidateNodeName !== nodeInfo.name &&
+            availableNodes.has(candidateNodeName)
+          ) {
+            nextNodeName = candidateNodeName;
+            break;
+          }
+
+          i = (i + 1) % this.sortedKeys.length;
+        }
+
+        if (!nextNodeName) {
+          console.warn(`[VNodeHashRing] No valid node found for vnode ${position}`);
+          continue;
+        }
+
+        positionTransferMap.set(position, nextNodeName);
+      }
+
+      // Migrate keys
       for (const key of keys) {
         try {
-          // Get the current value and TTL from the removed node
           const value = await nodeInfo.client.get(key);
           const ttl = await nodeInfo.client.ttl(key);
-          
-          // Find which virtual position of the removed node this key belongs to
+
           const keyPosition = this.hashFunction(key);
-          
-          // Binary search in sortedKeys to find the first virtual position >= keyPosition
+
+          // Binary search to find owning vnode
           let left = 0;
           let right = this.sortedKeys.length - 1;
           let ans = -1;
-          
+
           while (left <= right) {
             const mid = Math.floor((left + right) / 2);
+
             if (this.sortedKeys[mid] >= keyPosition) {
               ans = mid;
               right = mid - 1;
@@ -200,44 +241,50 @@ class ConsistentHashRingWithVNodes {
               left = mid + 1;
             }
           }
-          
-          // Wrap around if no position >= keyPosition found
+
           const owningPosition = this.sortedKeys[ans === -1 ? 0 : ans];
-          
-          // Verify this position belongs to the removed node
-          if (this.ring.get(owningPosition) !== nodeName) {
-            console.error(`[VNodeHashRing] Key ${key} does not belong to removed node ${nodeName}`);
+
+          if (this.ring.get(owningPosition) !== nodeInfo.name) {
             continue;
           }
 
-          // Get the next node for this position
           const nextNodeName = positionTransferMap.get(owningPosition);
+
+          if (!nextNodeName) {
+            failedCount++;
+            continue;
+          }
+
           const nextNode = this.nodes.get(nextNodeName);
 
-          if (nextNode) {
-            // Migrate the key to the next node
+          try {
             if (ttl > 0) {
-              // Key has a TTL, preserve it
               await nextNode.client.setEx(key, ttl, value);
             } else {
-              // Key has no TTL (persistent)
               await nextNode.client.set(key, value);
             }
 
-            migratedCount++;
-            
-            // Delete from removed node
             await nodeInfo.client.del(key);
+
+            migratedCount++;
+          } catch (err) {
+            if (err.message.includes('OOM')) {
+              console.warn(`[VNodeHashRing] Node ${nextNodeName} out of memory`);
+            }
+
+            failedCount++;
           }
+
         } catch (error) {
           console.error(`[VNodeHashRing] Failed to migrate key ${key}:`, error.message);
           failedCount++;
         }
       }
 
-      console.log(`[VNodeHashRing] Migration complete: ${migratedCount} keys migrated, ${failedCount} failed`);
+      console.log(`[VNodeHashRing] Migration complete: ${migratedCount} migrated, ${failedCount} failed`);
+
     } catch (error) {
-      console.error(`[VNodeHashRing] Error during data migration:`, error);
+      console.error(`[VNodeHashRing] Error during migration:`, error);
       throw new Error(`Failed to migrate data from ${nodeInfo.name}: ${error.message}`);
     }
   }
