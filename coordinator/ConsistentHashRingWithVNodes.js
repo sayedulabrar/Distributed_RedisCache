@@ -184,18 +184,28 @@ class ConsistentHashRingWithVNodes {
           // Find which virtual position of the removed node this key belongs to
           const keyPosition = this.hashFunction(key);
           
-          // Find the virtual position that owns this key (the one <= keyPosition, closest)
-          let owningPosition = null;
-          for (let i = virtualPositions.length - 1; i >= 0; i--) {
-            if (virtualPositions[i] <= keyPosition) {
-              owningPosition = virtualPositions[i];
-              break;
+          // Binary search in sortedKeys to find the first virtual position >= keyPosition
+          let left = 0;
+          let right = this.sortedKeys.length - 1;
+          let ans = -1;
+          
+          while (left <= right) {
+            const mid = Math.floor((left + right) / 2);
+            if (this.sortedKeys[mid] >= keyPosition) {
+              ans = mid;
+              right = mid - 1;
+            } else {
+              left = mid + 1;
             }
           }
           
-          // If no position found, use the largest position (wraps around)
-          if (owningPosition === null && virtualPositions.length > 0) {
-            owningPosition = virtualPositions[virtualPositions.length - 1];
+          // Wrap around if no position >= keyPosition found
+          const owningPosition = this.sortedKeys[ans === -1 ? 0 : ans];
+          
+          // Verify this position belongs to the removed node
+          if (this.ring.get(owningPosition) !== nodeName) {
+            console.error(`[VNodeHashRing] Key ${key} does not belong to removed node ${nodeName}`);
+            continue;
           }
 
           // Get the next node for this position
@@ -249,24 +259,21 @@ class ConsistentHashRingWithVNodes {
     
     // Binary search for the first virtual node >= keyPosition
     let left = 0;
-    let right = this.sortedKeys.length;
-
-    while (left < right) {
+    let right = this.sortedKeys.length - 1;
+    let ans = -1;
+    
+    while (left <= right) {
       const mid = Math.floor((left + right) / 2);
-      if (this.sortedKeys[mid] < keyPosition) {
-        left = mid + 1;
+      if (this.sortedKeys[mid] >= keyPosition) {
+        ans = mid;
+        right = mid - 1;
       } else {
-        right = mid;
+        left = mid + 1;
       }
     }
 
-    // Wrap around if we reached the end
-    if (left >= this.sortedKeys.length) {
-      left = 0;
-    }
-
-    // Get the virtual node position
-    const virtualNodePosition = this.sortedKeys[left];
+    // Wrap around if no position >= keyPosition found
+    const virtualNodePosition = this.sortedKeys[ans === -1 ? 0 : ans];
     
     // Map virtual node to physical node
     const physicalNodeName = this.ring.get(virtualNodePosition);
