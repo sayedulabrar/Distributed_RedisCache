@@ -39,7 +39,9 @@ class ConsistentHashRingWithVNodes {
   }
 
   /**
-   * Add a Redis node with virtual nodes to the ring
+   * Instead of using hash of parent node to get position in ring we use virtual node for that. Virtual node is only for finding
+   * positions in the ring and the node assigned to that position will still be the parent node . So when when we get positiond 
+   * in ring for keys position might be of virtual node but we will directly access the parent node . 
    */
   addNode(id, nodeConfig) {
     const nodeName = `cache_node_${id}`;
