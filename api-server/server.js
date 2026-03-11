@@ -1,3 +1,15 @@
+/**
+ * Distributed Cache API Server
+ * 
+ * This module implements an Express-based API server that acts as a client to a distributed Redis cache.
+ * It provides endpoints for cache operations (GET, POST, DELETE) with local caching for performance optimization.
+ * The server includes:
+ * - Connection pooling to coordinator
+ * - Local in-memory cache with TTL and LRU eviction
+ * - Comprehensive metrics collection (latency percentiles, hit rates, etc.)
+ * - Health checks and graceful shutdown
+ */
+
 const express = require('express');
 const axios = require('axios');
 
@@ -42,7 +54,16 @@ const coordinatorClient = axios.create({
   })
 });
 
-// Middleware: Request timing and logging
+/**
+ * Middleware: Request timing and logging
+ * 
+ * This middleware:
+ * - Logs incoming requests with timestamp and server ID
+ * - Measures response time for each request
+ * - Stores latency metrics (keeping last 10000 samples)
+ * - Updates request counters (total, successful, failed)
+ * - Adds performance headers (X-Response-Time, X-Server-ID) to responses
+ */
 app.use((req, res, next) => {
   const startTime = Date.now();
   
@@ -78,7 +99,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// Helper: Calculate percentiles
+/**
+ * Calculate the nth percentile from an array of numeric values
+ * 
+ * @param {number[]} arr - Array of numeric values
+ * @param {number} percentile - Percentile to calculate (0-100, e.g., 95 for p95)
+ * @returns {number} The calculated percentile value, or 0 if array is empty
+ * 
+ * Used for: latency analysis (p50, p95, p99), performance monitoring
+ */
 function calculatePercentile(arr, percentile) {
   if (arr.length === 0) return 0;
   const sorted = [...arr].sort((a, b) => a - b);
@@ -86,7 +115,17 @@ function calculatePercentile(arr, percentile) {
   return sorted[index];
 }
 
-// Helper: Check local cache
+/**
+ * Retrieve a value from the local in-memory cache
+ * 
+ * @param {string} key - The cache key to retrieve
+ * @returns {any|null} The cached value if found and not expired, null otherwise
+ * 
+ * Behavior:
+ * - Returns null if key doesn't exist
+ * - Checks TTL and removes expired entries automatically
+ * - Does not update metrics (caller is responsible)
+ */
 function getFromLocalCache(key) {
   const cached = localCache.get(key);
   if (!cached) return null;
@@ -100,7 +139,17 @@ function getFromLocalCache(key) {
   return cached.value;
 }
 
-// Helper: Set local cache
+/**
+ * Store a value in the local in-memory cache
+ * 
+ * @param {string} key - The cache key
+ * @param {any} value - The value to cache
+ * 
+ * Features:
+ * - Implements LRU (Least Recently Used) eviction when cache reaches max size
+ * - Stores timestamp for TTL validation
+ * - Automatically evicts oldest item if capacity exceeded
+ */
 function setToLocalCache(key, value) {
   // Implement LRU eviction if cache is full
   if (localCache.size >= LOCAL_CACHE_MAX_SIZE) {
@@ -114,7 +163,22 @@ function setToLocalCache(key, value) {
   });
 }
 
-// POST /cache - Set a cache value
+/**
+ * POST /cache - Set a cache value
+ * 
+ * Request body: { key: string, value: any, ttl?: number }
+ * 
+ * Behavior:
+ * - Validates that key and value are provided
+ * - Forwards the request to the coordinator for distributed storage
+ * - Updates local cache for fast subsequent access
+ * - Increments cache.sets metric
+ * - Returns 201 Created with response data and server ID
+ * 
+ * Error handling:
+ * - 400: Missing key or value
+ * - 500: Coordinator error or other server error
+ */
 app.post('/cache', async (req, res) => {
   try {
     const { key, value, ttl } = req.body;
@@ -153,7 +217,28 @@ app.post('/cache', async (req, res) => {
   }
 });
 
-// GET /cache/:key - Get a cache value
+/**
+ * GET /cache/:key - Get a cache value
+ * 
+ * Path parameter: key - The cache key to retrieve
+ * 
+ * Behavior:
+ * - Checks local cache first (faster, 5s TTL)
+ * - If miss, queries coordinator for the value
+ * - Caches hits locally for future requests
+ * - Tracks hit/miss metrics separately
+ * - Returns source indication (local-cache or redis)
+ * 
+ * Response includes:
+ * - success: boolean
+ * - value: the cached value (if found)
+ * - source: 'local-cache' or 'redis'
+ * - serverId: which server handled the request
+ * 
+ * Error handling:
+ * - 404: Key not found in cache
+ * - 500: Coordinator error or other server error
+ */
 app.get('/cache/:key', async (req, res) => {
   try {
     const { key } = req.params;
@@ -212,7 +297,20 @@ app.get('/cache/:key', async (req, res) => {
   }
 });
 
-// DELETE /cache/:key - Delete a cache value
+/**
+ * DELETE /cache/:key - Delete a cache value
+ * 
+ * Path parameter: key - The cache key to delete
+ * 
+ * Behavior:
+ * - Removes entry from local cache immediately
+ * - Forwards deletion request to coordinator
+ * - Increments cache.deletes metric
+ * - Returns response data and server ID
+ * 
+ * Error handling:
+ * - 500: Coordinator error or other server error
+ */
 app.delete('/cache/:key', async (req, res) => {
   try {
     const { key } = req.params;
@@ -239,7 +337,33 @@ app.delete('/cache/:key', async (req, res) => {
   }
 });
 
-// GET /metrics - Get server metrics
+/**
+ * GET /metrics - Get comprehensive server metrics
+ * 
+ * Returns detailed performance and operational metrics including:
+ * 
+ * Uptime:
+ * - seconds: total uptime in seconds
+ * - formatted: human-readable format (h/m/s)
+ * 
+ * Request metrics:
+ * - total, successful, failed counts
+ * - requestsPerSecond (RPS): requests divided by uptime
+ * - successRate: percentage of successful requests
+ * 
+ * Cache metrics:
+ * - hits, misses, sets, deletes: operation counts
+ * - hitRate: percentage of cache hits vs misses
+ * - localCacheSize: current items in local cache
+ * - localCacheMaxSize: configured capacity
+ * 
+ * Latency metrics (from last 10000 requests):
+ * - average: mean response time
+ * - p50, p95, p99: percentile latencies
+ * - samples: number of latency measurements stored
+ * 
+ * Useful for: monitoring server health, performance analysis, load testing
+ */
 app.get('/metrics', async (req, res) => {
   try {
     // Calculate latency percentiles
@@ -300,7 +424,23 @@ app.get('/metrics', async (req, res) => {
   }
 });
 
-// GET /health - Health check
+/**
+ * GET /health - Health check endpoint
+ * 
+ * Behavior:
+ * - Checks coordinator connectivity and health
+ * - Returns server status, uptime, and local cache info
+ * - Responds with 200 if healthy, 503 if coordinator unreachable
+ * 
+ * Response:
+ * - status: 'healthy' or 'unhealthy'
+ * - serverId: this server's ID
+ * - uptime: seconds since server started
+ * - coordinator: health status from coordinator
+ * - localCache: size and max capacity info
+ * 
+ * Used by: load balancers, orchestration systems, monitoring tools
+ */
 app.get('/health', async (req, res) => {
   try {
     // Check coordinator health
@@ -325,7 +465,16 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// GET / - API info
+/**
+ * GET / - API information and endpoint documentation
+ * 
+ * Returns:
+ * - Server metadata (name, version, serverId)
+ * - List of supported features
+ * - Complete endpoint documentation with request/response formats
+ * 
+ * Useful for: API discovery, documentation, client integration
+ */
 app.get('/', (req, res) => {
   res.json({
     name: 'Distributed Cache API Server',
@@ -348,7 +497,19 @@ app.get('/', (req, res) => {
   });
 });
 
-// Graceful shutdown
+/**
+ * Graceful shutdown handler
+ * 
+ * Triggered by: SIGTERM signal (container stop, orchestration systems)
+ * 
+ * Process:
+ * 1. Logs shutdown initiation
+ * 2. Stops accepting new requests
+ * 3. Waits up to 10 seconds for connections to close
+ * 4. Force exits if connections persist
+ * 
+ * Purpose: Ensures clean shutdown during deployment or scaling operations
+ */
 process.on('SIGTERM', () => {
   console.log(`[Server ${SERVER_ID}] Received SIGTERM, shutting down gracefully...`);
   
@@ -364,7 +525,15 @@ process.on('SIGTERM', () => {
   }, 10000);
 });
 
-// Start server
+/**
+ * Server startup
+ * 
+ * Initializes the Express server:
+ * - Listens on configured PORT
+ * - Displays startup information
+ * - Establishes connection pool to coordinator
+ * - Ready to accept requests
+ */
 const server = app.listen(PORT, () => {
   console.log('\n' + '='.repeat(60));
   console.log(`API SERVER ${SERVER_ID} STARTED`);
