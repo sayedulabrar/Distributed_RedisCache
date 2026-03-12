@@ -93,7 +93,7 @@ app.use((req, res, next) => {
     res.setHeader('X-Response-Time', `${duration}ms`);
     res.setHeader('X-Server-ID', SERVER_ID);
     
-    originalSend.call(this, data);
+    originalSend.call(this, data);// same as res.send(data)
   };
   
   next();
@@ -202,6 +202,8 @@ app.post('/cache', async (req, res) => {
     
     // Update local cache
     setToLocalCache(key, value);
+
+
     
     res.status(201).json({
       ...response.data,
