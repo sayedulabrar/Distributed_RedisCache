@@ -9,11 +9,12 @@ class ConsistentHashRingWithReplication {
     this.replicationMode = replicationMode; // 'async' or 'sync'
     
     this.ring = new Map();              // position -> node name
+    // Replication structures
+    this.nodes = new Map();             // node name -> { id, primary, replica, config }
     this.sortedKeys = [];               // sorted virtual node positions
     this.virtualNodeMap = new Map();    // node name -> virtual positions
     
-    // Replication structures
-    this.nodes = new Map();             // node name -> { id, primary, replica, config }
+
     
     console.log(`[ReplicationRing] Initializing with ${this.nodeCount} Redis nodes`);
     console.log(`[ReplicationRing] Replication mode: ${this.replicationMode}`);
