@@ -129,22 +129,21 @@ class ConsistentHashRingWithReplication {
     
     // Binary search
     let left = 0;
-    let right = this.sortedKeys.length;
+    let right = this.sortedKeys.length-1;
+    let ans=-1;
 
-    while (left < right) {
-      const mid = Math.floor((left + right) / 2);
-      if (this.sortedKeys[mid] < keyPosition) {
-        left = mid + 1;
-      } else {
-        right = mid;
+    while(left<=right){
+      const mid= Math.floor((left+right)/2);
+      if(this.sortedKeys[mid]>=keyPosition){
+        ans=mid;
+        right=mid-1;
+      }else{
+        left=mid+1;
       }
     }
+    ans=ans==-1?0:ans;
 
-    if (left >= this.sortedKeys.length) {
-      left = 0;
-    }
-
-    const virtualNodePosition = this.sortedKeys[left];
+    const virtualNodePosition = this.sortedKeys[ans];
     const physicalNodeName = this.ring.get(virtualNodePosition);
     
     return this.nodes.get(physicalNodeName);
@@ -366,8 +365,8 @@ class ConsistentHashRingWithReplication {
           const hitRate = total > 0 ? ((hits / total) * 100).toFixed(2) : '0.00';
           
           // Check replication lag
-          const replicaOffsetMatch = replicaInfo.match(/master_repl_offset:(\d+)/);
           const primaryOffsetMatch = primaryInfo.match(/master_repl_offset:(\d+)/);
+          const replicaOffsetMatch = replicaInfo.match(/slave_repl_offset:(\d+)/);
           
           const replicaOffset = replicaOffsetMatch ? parseInt(replicaOffsetMatch[1]) : 0;
           const primaryOffset = primaryOffsetMatch ? parseInt(primaryOffsetMatch[1]) : 0;
