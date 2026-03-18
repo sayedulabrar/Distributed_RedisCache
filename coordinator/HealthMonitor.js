@@ -17,7 +17,7 @@ class HealthMonitor {
     console.log(`[HealthMonitor] Failure threshold: ${this.failureThreshold} consecutive failures`);
     
     // Initialize all nodes as healthy
-    for (const [nodeName] of this.cacheRing.nodes) {
+    for (const nodeName of this.cacheRing.nodes.keys()) {
       this.nodeStatus.set(nodeName, {
         status: 'HEALTHY',
         failCount: 0,

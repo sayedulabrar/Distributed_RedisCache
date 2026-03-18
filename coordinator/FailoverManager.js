@@ -16,7 +16,7 @@ class FailoverManager {
    */
   async failoverToReplica(nodeName) {
     console.log(`[FailoverManager] Starting failover for ${nodeName}`);
-    
+    this.failoverMetrics.totalFailovers++;
     const startTime = Date.now();
     
     try {
@@ -46,7 +46,6 @@ class FailoverManager {
       });
 
       // Update metrics
-      this.failoverMetrics.totalFailovers++;
       this.failoverMetrics.successfulFailovers++;
       this.failoverMetrics.totalFailoverTime += duration;
       this.updateAverageFailoverTime();
