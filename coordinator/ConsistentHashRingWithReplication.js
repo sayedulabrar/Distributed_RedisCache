@@ -108,22 +108,22 @@ class ConsistentHashRingWithReplication {
 
     const keyPosition = this.hashFunction(key);
     let left = 0;
-    let right = this.sortedKeys.length;
+    let right = this.sortedKeys.length-1;
+    let ans=-1;
 
-    while (left < right) {
+    while (left <= right) {
       const mid = Math.floor((left + right) / 2);
-      if (this.sortedKeys[mid] < keyPosition) {
-        left = mid + 1;
+      if (this.sortedKeys[mid] >= keyPosition) {
+        ans=mid;
+        right = mid - 1;
       } else {
-        right = mid;
+        left = mid+1;
       }
     }
+   
+    ans = ans == -1 ? 0 : ans;
 
-    if (left >= this.sortedKeys.length) {
-      left = 0;
-    }
-
-    const virtualNodePosition = this.sortedKeys[left];
+    const virtualNodePosition = this.sortedKeys[ans];
     const physicalNodeName = this.ring.get(virtualNodePosition);
     
     return this.nodes.get(physicalNodeName);
