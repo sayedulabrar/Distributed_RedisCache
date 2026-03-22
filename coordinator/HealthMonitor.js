@@ -112,6 +112,84 @@ class HealthMonitor {
   }
 
   /**
+   * Check health of a single node (Fixed version)
+   */
+  async checkNodefixed(nodeName, nodeInfo) {
+    const status = this.nodeStatus.get(nodeName);
+    if (!status) return;
+
+    status.lastCheck = Date.now();
+
+    const isFailedOver = status.status === 'FAILED_OVER';
+
+    try {
+      // 1. Critical: always check the current write endpoint first
+      await Promise.race([
+        nodeInfo.primary.client.ping(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Ping timeout')), 3000))
+      ]);
+
+      // Current primary is responsive → node is writable
+      if (status.failCount > 0) {
+        console.log(`[HealthMonitor] ✓ ${nodeName} current primary recovered from transient failure`);
+      }
+
+      // Only now consider recovery of the original primary (if we're in failed-over state)
+      if (isFailedOver && nodeInfo.replica?.client) {
+        try {
+          // Check if the old primary (now replica) is reachable again
+          await Promise.race([
+            nodeInfo.replica.client.ping(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Ping timeout')), 3000))
+          ]);
+
+          console.log(`[HealthMonitor] ✓ ${nodeName} original primary is reachable again → reconfiguring as replica`);
+          await this.handleNodeRecovery(nodeName);
+
+          // After successful recovery treat topology as fully healthy again
+
+        } catch (recoveryErr) {
+          console.log('[HealthMonitor] Original still unreachable.')
+        }
+      }
+
+      // Mark as healthy (current writer is good)
+      status.status = 'HEALTHY';
+      status.failCount = 0;
+      status.lastSuccess = Date.now();
+
+    } catch (error) {
+      // Current primary is not responding
+      status.failCount++;
+
+      console.warn(
+        `[HealthMonitor] ✗ ${nodeName} current primary failed ` +
+        `(${status.failCount}/${this.failureThreshold}) - ${error.message}`
+      );
+
+      if (status.failCount >= this.failureThreshold) {
+        if (status.status !== 'FAILED' && status.status !== 'FAILED_OVER') {
+          console.error(`[HealthMonitor] ☠ ${nodeName} PRIMARY IS DEAD - Triggering failover`);
+
+          status.status = 'FAILED';
+          this.logHealthEvent({
+            timestamp: Date.now(),
+            node: nodeName,
+            event: 'PRIMARY_FAILED',
+            error: error.message,
+            failCount: status.failCount
+          });
+
+          if (this.cacheRing.failoverManager) {
+            await this.cacheRing.failoverManager.failoverToReplica(nodeName);
+            status.status = 'FAILED_OVER';
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Handle primary node recovery
    */
   async handleNodeRecovery(nodeName) {
