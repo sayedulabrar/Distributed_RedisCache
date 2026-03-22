@@ -390,7 +390,7 @@ class ConsistentHashRingWithReplication {
           const total = hits + misses;
           const hitRate = total > 0 ? ((hits / total) * 100).toFixed(2) : '0.00';
           
-          const replicaOffsetMatch = replicaInfo.match(/master_repl_offset:(\d+)/);
+          const replicaOffsetMatch = replicaInfo.match(/slave_repl_offset:(\d+)/);
           const primaryOffsetMatch = primaryInfo.match(/master_repl_offset:(\d+)/);
           
           const replicaOffset = replicaOffsetMatch ? parseInt(replicaOffsetMatch[1]) : 0;
@@ -572,7 +572,10 @@ class ConsistentHashRingWithReplication {
     await Promise.all(
       Array.from(this.nodes.values()).map(async (node) => {
         try {
-          await node.primary.client.flushDb();
+          await Promise.all([
+              node.primary.client.flushDb(),
+              node.replica.client.flushDb()
+            ]);
           console.log(`[HashRing] Cleared ${node.name} primary`);
         } catch (error) {
           console.error(`[HashRing] Clear error on ${node.name}:`, error.message);
