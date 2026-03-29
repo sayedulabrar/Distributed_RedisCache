@@ -62,6 +62,8 @@ class HealthMonitor {
         setTimeout(() => reject(new Error('Ping timeout')), 3000)
       );
       
+      // Promise.race() in Node.js is a method that runs multiple promises at the same time and returns the result of the first one that 
+      // settles (either resolved or rejected).
       await Promise.race([pingPromise, timeoutPromise]);
       
       // Success - handle based on previous status
